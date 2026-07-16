@@ -38,6 +38,7 @@ mod orchestrated_agent_identity_styling;
 mod orchestration_block;
 mod orchestration_model;
 mod platform;
+mod prompt_history_menu;
 mod resume;
 mod session_registry;
 mod skills_menu;
