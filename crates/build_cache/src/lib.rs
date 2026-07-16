@@ -267,7 +267,6 @@ pub struct CacheSetupReport {
     pub plan: Option<CacheSetupPlan>,
     pub invocations: Vec<CachePreparationReport>,
     pub add_envs: BTreeMap<String, String>,
-    pub export_script: Option<String>,
 }
 
 impl CacheSetupReport {
@@ -442,7 +441,9 @@ where
                 CacheScope::Repository { .. } => {
                     for (name, value) in &response.output.add_envs {
                         if repository_env.insert(name.clone(), value.clone()).is_some() {
-                            log::warn!("repository build-cache environment conflict resolved by canonical repository order");
+                            log::warn!(
+                                "repository build-cache environment conflict resolved by canonical repository order"
+                            );
                         }
                     }
                 }
@@ -455,13 +456,23 @@ where
     }
 
     report.add_envs = global_env.unwrap_or(repository_env);
-    report.export_script = build_export_script(&report.add_envs);
+    report.add_envs.retain(|name, _| {
+        if is_valid_env_name(name) {
+            true
+        } else {
+            tracing::warn!(
+                target: "build_cache",
+                "ignored invalid build-cache environment variable name"
+            );
+            false
+        }
+    });
     report.plan = Some(plan);
     report
 }
 
 /// Construct a plan for setting up build caches on the current system. This requires:
-/// - Analysis of the toolchains used in each repository (`detections`) 
+/// - Analysis of the toolchains used in each repository (`detections`)
 /// - System-level toolchains such as package managers
 fn construct_plan(
     cache_root: PathBuf,
@@ -668,35 +679,13 @@ fn aggregate_mode_stats(
     stats
 }
 
-pub fn is_valid_env_name(name: &str) -> bool {
+fn is_valid_env_name(name: &str) -> bool {
     let mut bytes = name.bytes();
     let Some(first) = bytes.next() else {
         return false;
     };
     (first.is_ascii_alphabetic() || first == b'_')
         && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-}
-
-pub fn posix_single_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-pub fn build_export_script(environment: &BTreeMap<String, String>) -> Option<String> {
-    let exports = environment
-        .iter()
-        .filter_map(|(name, value)| {
-            if is_valid_env_name(name) {
-                Some(format!("export {name}={}", posix_single_quote(value)))
-            } else {
-                tracing::warn!(
-                    target: "build_cache",
-                    "ignored invalid build-cache environment variable name"
-                );
-                None
-            }
-        })
-        .collect::<Vec<_>>();
-    (!exports.is_empty()).then(|| exports.join("; "))
 }
 
 #[cfg(test)]
