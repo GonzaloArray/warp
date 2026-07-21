@@ -1,7 +1,7 @@
 use super::{
     AgentTabKind, AgentTabStatus, AgentTabsProjection, ExternalAgentSessionSnapshot,
     ExternalChildSnapshot, ExternalProvider, MonitorNodeId, native_display_label_for,
-    parse_codex_subagent_topology,
+    parse_claude_agent_tool_use_topology, parse_codex_subagent_topology,
 };
 use crate::ai::agent_conversations_model::entry::{
     AgentConversationBackingData, AgentConversationCapabilities, AgentConversationDisplayData,
@@ -361,6 +361,22 @@ fn parse_codex_subagent_topology_reads_only_structured_events() {
     assert_eq!(nodes[0].status, AgentTabStatus::Working);
     assert_eq!(nodes[1].display_label, "warp_security");
     assert_eq!(nodes[1].status, AgentTabStatus::Failed);
+}
+
+#[test]
+fn parse_claude_agent_tool_use_topology_reads_task_and_agent_tools() {
+    let jsonl = r#"
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01abc","name":"Agent","input":{"description":"Deep-dive webhook core","name":"webhook-core","subagent_type":"Explore"}}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"not a tool"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_02def","name":"Task","input":{"description":"Security pass","subagent_type":"Explore"}}]}}
+"#;
+
+    let nodes = parse_claude_agent_tool_use_topology(jsonl);
+    assert_eq!(nodes.len(), 2);
+    assert_eq!(nodes[0].child_key, "toolu_01abc");
+    assert_eq!(nodes[0].display_label, "Deep-dive webhook core");
+    assert_eq!(nodes[0].status, AgentTabStatus::Working);
+    assert_eq!(nodes[1].display_label, "Security pass");
 }
 
 #[test]

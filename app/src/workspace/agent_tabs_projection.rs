@@ -8,6 +8,8 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use warpui::EntityId;
 
@@ -306,22 +308,20 @@ impl AgentTabsProjection {
                     let profile_key = session_id
                         .clone()
                         .unwrap_or_else(|| format!("pane-{terminal_view_id}"));
-                    let children = match provider {
-                        ExternalProvider::Codex => session_id
-                            .as_deref()
-                            .map(load_codex_subagents_for_session)
-                            .unwrap_or_default()
-                            .into_iter()
-                            .map(|node| ExternalChildSnapshot {
-                                parent_terminal_view_id: terminal_view_id,
-                                child_key: node.child_key,
-                                display_label: node.display_label,
-                                status: node.status,
-                                depth: 1,
-                            })
-                            .collect(),
-                        _ => Vec::new(),
-                    };
+                    let children = load_external_subagents(
+                        provider,
+                        session_id.as_deref(),
+                        session.session_context.transcript_path.as_deref(),
+                    )
+                    .into_iter()
+                    .map(|node| ExternalChildSnapshot {
+                        parent_terminal_view_id: terminal_view_id,
+                        child_key: node.child_key,
+                        display_label: node.display_label,
+                        status: node.status,
+                        depth: 1,
+                    })
+                    .collect();
                     ExternalAgentSessionSnapshot {
                         terminal_view_id,
                         provider,
@@ -362,16 +362,48 @@ impl AgentTabsProjection {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct CodexSubagentNode {
+pub(crate) struct ExternalSubagentNode {
     pub(crate) child_key: String,
     pub(crate) display_label: String,
     pub(crate) status: AgentTabStatus,
 }
 
+fn load_external_subagents(
+    provider: ExternalProvider,
+    session_id: Option<&str>,
+    transcript_path: Option<&str>,
+) -> Vec<ExternalSubagentNode> {
+    let cache_key = format!(
+        "{provider:?}:{}:{}",
+        session_id.unwrap_or(""),
+        transcript_path.unwrap_or("")
+    );
+    if let Some(cached) = topology_cache_get(&cache_key) {
+        return cached;
+    }
+    let nodes = match provider {
+        ExternalProvider::Codex => session_id
+            .map(load_codex_subagents_for_session)
+            .unwrap_or_default(),
+        ExternalProvider::Claude => {
+            load_claude_subagents(session_id, transcript_path)
+        }
+        // No trusted structured child topology yet for these CLIs.
+        ExternalProvider::Gemini
+        | ExternalProvider::Hermes
+        | ExternalProvider::OpenCode
+        | ExternalProvider::Cursor
+        | ExternalProvider::Copilot
+        | ExternalProvider::Other => Vec::new(),
+    };
+    topology_cache_put(cache_key, nodes.clone());
+    nodes
+}
+
 /// Pure parser over Codex rollout JSONL. Only `sub_agent_activity` events are
 /// trusted; terminal stdout is never inspected.
-pub(crate) fn parse_codex_subagent_topology(jsonl: &str) -> Vec<CodexSubagentNode> {
-    let mut by_key: HashMap<String, CodexSubagentNode> = HashMap::new();
+pub(crate) fn parse_codex_subagent_topology(jsonl: &str) -> Vec<ExternalSubagentNode> {
+    let mut by_key: HashMap<String, ExternalSubagentNode> = HashMap::new();
     for line in jsonl.lines() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
@@ -408,10 +440,9 @@ pub(crate) fn parse_codex_subagent_topology(jsonl: &str) -> Vec<CodexSubagentNod
             Some("blocked") => AgentTabStatus::Blocked,
             _ => AgentTabStatus::Working,
         };
-        // Later events overwrite earlier ones for the same thread id.
         by_key.insert(
             child_key.clone(),
-            CodexSubagentNode {
+            ExternalSubagentNode {
                 child_key,
                 display_label: label,
                 status,
@@ -430,7 +461,7 @@ fn codex_agent_path_label(path: &str) -> String {
         .to_string()
 }
 
-fn load_codex_subagents_for_session(session_id: &str) -> Vec<CodexSubagentNode> {
+fn load_codex_subagents_for_session(session_id: &str) -> Vec<ExternalSubagentNode> {
     let Some(path) = find_codex_rollout_path(session_id) else {
         return Vec::new();
     };
@@ -438,6 +469,262 @@ fn load_codex_subagents_for_session(session_id: &str) -> Vec<CodexSubagentNode> 
         return Vec::new();
     };
     parse_codex_subagent_topology(&jsonl)
+}
+
+/// Claude Code: prefer `subagents/agent-*.jsonl` under the session directory,
+/// then enrich labels from parent transcript `Agent`/`Task` tool_use events.
+fn load_claude_subagents(
+    session_id: Option<&str>,
+    transcript_path: Option<&str>,
+) -> Vec<ExternalSubagentNode> {
+    let mut by_key: HashMap<String, ExternalSubagentNode> = HashMap::new();
+
+    if let Some(path) = transcript_path.map(PathBuf::from).filter(|p| p.is_file()) {
+        if let Ok(jsonl) = fs::read_to_string(&path) {
+            merge_claude_tool_use_subagents(&jsonl, &mut by_key);
+        }
+        // Sibling `subagents/` next to a `…/<session>.jsonl` transcript.
+        if let Some(parent) = path.parent() {
+            let sid = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            let sub_dir = if parent.file_name().and_then(|n| n.to_str()) == Some(sid) {
+                parent.join("subagents")
+            } else {
+                parent.join(sid).join("subagents")
+            };
+            merge_claude_subagent_dir(&sub_dir, &mut by_key);
+        }
+    }
+
+    if let Some(session_id) = session_id.filter(|id| is_safe_profile_key(id)) {
+        if let Some(session_dir) = find_claude_session_dir(session_id) {
+            merge_claude_subagent_dir(&session_dir.join("subagents"), &mut by_key);
+            let transcript = session_dir
+                .parent()
+                .map(|p| p.join(format!("{session_id}.jsonl")))
+                .filter(|p| p.is_file());
+            if let Some(path) = transcript {
+                if let Ok(jsonl) = fs::read_to_string(path) {
+                    merge_claude_tool_use_subagents(&jsonl, &mut by_key);
+                }
+            }
+        }
+    }
+
+    let mut nodes = by_key.into_values().collect::<Vec<_>>();
+    nodes.sort_by(|a, b| a.child_key.cmp(&b.child_key));
+    nodes
+}
+
+/// Pure helper: Claude Code `Agent` / `Task` tool_use events from a parent transcript.
+pub(crate) fn parse_claude_agent_tool_use_topology(jsonl: &str) -> Vec<ExternalSubagentNode> {
+    let mut by_key = HashMap::new();
+    merge_claude_tool_use_subagents(jsonl, &mut by_key);
+    let mut nodes = by_key.into_values().collect::<Vec<_>>();
+    nodes.sort_by(|a, b| a.child_key.cmp(&b.child_key));
+    nodes
+}
+
+fn merge_claude_tool_use_subagents(
+    jsonl: &str,
+    by_key: &mut HashMap<String, ExternalSubagentNode>,
+) {
+    for line in jsonl.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(content) = value
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array())
+        else {
+            continue;
+        };
+        for item in content {
+            if item.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
+                continue;
+            }
+            let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            if name != "Agent" && name != "Task" && name != "task" {
+                continue;
+            }
+            let input = item.get("input").unwrap_or(&serde_json::Value::Null);
+            let description = input
+                .get("description")
+                .or_else(|| input.get("name"))
+                .and_then(|v| v.as_str())
+                .and_then(sanitize_display_label)
+                .unwrap_or_else(|| "Subagent".to_string());
+            let child_key = item
+                .get("id")
+                .and_then(|v| v.as_str())
+                .filter(|key| is_safe_profile_key(key))
+                .map(str::to_owned)
+                .or_else(|| {
+                    input
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .filter(|key| is_safe_profile_key(key))
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| format!("tool-{}", description.chars().take(24).collect::<String>()));
+            // Prefer an existing filesystem-based entry's status; only insert labels.
+            by_key
+                .entry(child_key.clone())
+                .and_modify(|node| {
+                    if node.display_label == "Subagent" || node.display_label.starts_with("agent-")
+                    {
+                        node.display_label = description.clone();
+                    }
+                })
+                .or_insert(ExternalSubagentNode {
+                    child_key,
+                    display_label: description,
+                    status: AgentTabStatus::Working,
+                });
+        }
+    }
+}
+
+fn merge_claude_subagent_dir(dir: &Path, by_key: &mut HashMap<String, ExternalSubagentNode>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("subagent");
+        // Files look like `agent-a27ae0a9950dfd8bd.jsonl`.
+        let child_key = stem
+            .strip_prefix("agent-")
+            .unwrap_or(stem)
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            .take(64)
+            .collect::<String>();
+        if child_key.is_empty() {
+            continue;
+        }
+        let label = claude_subagent_file_label(&path)
+            .unwrap_or_else(|| format!("Subagent {child_key}"));
+        let status = claude_subagent_file_status(&path);
+        by_key
+            .entry(child_key.clone())
+            .and_modify(|node| {
+                node.status = status;
+                if node.display_label == "Subagent" {
+                    node.display_label = label.clone();
+                }
+            })
+            .or_insert(ExternalSubagentNode {
+                child_key,
+                display_label: label,
+                status,
+            });
+    }
+}
+
+fn claude_subagent_file_label(path: &Path) -> Option<String> {
+    let file = fs::File::open(path).ok()?;
+    use std::io::{BufRead, BufReader};
+    for line in BufReader::new(file).lines().take(40).flatten() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if value.get("type").and_then(|t| t.as_str()) != Some("user") {
+            continue;
+        }
+        let text = value
+            .get("message")
+            .and_then(|m| {
+                if let Some(s) = m.as_str() {
+                    Some(s.to_owned())
+                } else if let Some(s) = m.get("content").and_then(|c| c.as_str()) {
+                    Some(s.to_owned())
+                } else if let Some(arr) = m.get("content").and_then(|c| c.as_array()) {
+                    arr.iter().find_map(|item| {
+                        if item.get("type").and_then(|t| t.as_str()) == Some("text") {
+                            item.get("text")
+                                .and_then(|t| t.as_str())
+                                .map(str::to_owned)
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                }
+            })?;
+        // Prefer a short actionable title: first line, capped.
+        let first_line = text.lines().next().unwrap_or(&text).trim();
+        return sanitize_display_label(first_line).map(|label| {
+            if label.len() > 48 {
+                format!("{}…", label.chars().take(47).collect::<String>())
+            } else {
+                label
+            }
+        });
+    }
+    None
+}
+
+fn claude_subagent_file_status(path: &Path) -> AgentTabStatus {
+    let Ok(meta) = fs::metadata(path) else {
+        return AgentTabStatus::Unavailable;
+    };
+    let Ok(modified) = meta.modified() else {
+        return AgentTabStatus::Working;
+    };
+    let age = std::time::SystemTime::now()
+        .duration_since(modified)
+        .unwrap_or_default();
+    // Recently written transcripts are treated as still working.
+    if age.as_secs() < 90 {
+        AgentTabStatus::Working
+    } else {
+        AgentTabStatus::Completed
+    }
+}
+
+fn find_claude_session_dir(session_id: &str) -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    let projects = home.join(".claude").join("projects");
+    if !projects.is_dir() {
+        return None;
+    }
+    walk_for_named_dir(&projects, session_id, 0)
+}
+
+fn walk_for_named_dir(dir: &Path, name: &str, depth: usize) -> Option<PathBuf> {
+    if depth > 5 {
+        return None;
+    }
+    let entries = fs::read_dir(dir).ok()?;
+    let mut dirs = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if path.file_name().and_then(|n| n.to_str()) == Some(name) {
+            return Some(path);
+        }
+        dirs.push(path);
+    }
+    dirs.sort();
+    for path in dirs {
+        if let Some(found) = walk_for_named_dir(&path, name, depth + 1) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 fn find_codex_rollout_path(session_id: &str) -> Option<PathBuf> {
@@ -449,7 +736,6 @@ fn find_codex_rollout_path(session_id: &str) -> Option<PathBuf> {
     if !sessions_root.is_dir() {
         return None;
     }
-    // Prefer the conventional filename suffix; fall back to a shallow walk.
     let needle = format!("-{session_id}.jsonl");
     walk_for_suffix(&sessions_root, &needle, 0)
 }
@@ -481,6 +767,40 @@ fn walk_for_suffix(dir: &Path, needle: &str, depth: usize) -> Option<PathBuf> {
         }
     }
     None
+}
+
+// ── short TTL cache so render loops do not thrash the filesystem ──────────
+
+struct TopologyCacheEntry {
+    at: Instant,
+    nodes: Vec<ExternalSubagentNode>,
+}
+
+static TOPOLOGY_CACHE: Mutex<Option<HashMap<String, TopologyCacheEntry>>> = Mutex::new(None);
+const TOPOLOGY_CACHE_TTL: Duration = Duration::from_secs(2);
+
+fn topology_cache_get(key: &str) -> Option<Vec<ExternalSubagentNode>> {
+    let mut guard = TOPOLOGY_CACHE.lock().ok()?;
+    let cache = guard.get_or_insert_with(HashMap::new);
+    let entry = cache.get(key)?;
+    if entry.at.elapsed() > TOPOLOGY_CACHE_TTL {
+        return None;
+    }
+    Some(entry.nodes.clone())
+}
+
+fn topology_cache_put(key: String, nodes: Vec<ExternalSubagentNode>) {
+    let Ok(mut guard) = TOPOLOGY_CACHE.lock() else {
+        return;
+    };
+    let cache = guard.get_or_insert_with(HashMap::new);
+    cache.insert(
+        key,
+        TopologyCacheEntry {
+            at: Instant::now(),
+            nodes,
+        },
+    );
 }
 
 fn native_display_label(node: &AgentHierarchyNode) -> String {

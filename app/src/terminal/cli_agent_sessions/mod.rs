@@ -46,6 +46,9 @@ pub struct CLIAgentSessionContext {
     pub cwd: Option<String>,
     pub project: Option<String>,
     pub session_id: Option<String>,
+    /// Provider transcript / rollout path when the CLI plugin reports one.
+    /// Used by the agent monitor for structured subagent topology (never PTY text).
+    pub transcript_path: Option<String>,
     pub tool_name: Option<String>,
     pub tool_input_preview: Option<String>,
     pub summary: Option<String>,
@@ -192,6 +195,15 @@ impl CLIAgentSession {
             .session_id
             .clone()
             .or(self.session_context.session_id.take());
+        if let Some(path) = event
+            .payload
+            .transcript_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+        {
+            self.session_context.transcript_path = Some(path.to_owned());
+        }
 
         let new_status = match &event.event {
             CLIAgentEventType::PromptSubmit => {
