@@ -80,10 +80,6 @@ use crate::ui_components::icons::Icon as UiIcon;
 use crate::util::bindings::keybinding_name_to_display_string;
 use crate::util::color::Opacity;
 use crate::workspace::action::{NewSessionMenuAnchor, RestoreConversationLayout, WorkspaceAction};
-use crate::workspace::agent_provider_hub::{
-    AgentProviderHubPrefs, AgentProviderId, ProviderHubRow, ProviderInstallState, command_on_path,
-    provider_hub_rows,
-};
 use crate::workspace::agent_tabs_projection::{
     AgentTabKind, AgentTabNode, AgentTabStatus, AgentTabsProjection, MonitorNodeId,
 };
@@ -762,8 +758,7 @@ struct AgentMonitorPanelState {
     row_mouse_states: HashMap<MonitorNodeId, MouseStateHandle>,
     chevron_mouse_states: HashMap<MonitorNodeId, MouseStateHandle>,
     customize_mouse_states: HashMap<MonitorNodeId, MouseStateHandle>,
-    provider_toggle_mouse_states: HashMap<AgentProviderId, MouseStateHandle>,
-    provider_launch_mouse_states: HashMap<AgentProviderId, MouseStateHandle>,
+    configure_providers_mouse_state: MouseStateHandle,
     keyboard_target: Option<AgentMonitorKeyboardTarget>,
 }
 
@@ -870,18 +865,8 @@ impl AgentMonitorPanelState {
         self.customize_mouse_states.entry(id).or_default().clone()
     }
 
-    fn provider_toggle_mouse_state(&mut self, id: AgentProviderId) -> MouseStateHandle {
-        self.provider_toggle_mouse_states
-            .entry(id)
-            .or_default()
-            .clone()
-    }
-
-    fn provider_launch_mouse_state(&mut self, id: AgentProviderId) -> MouseStateHandle {
-        self.provider_launch_mouse_states
-            .entry(id)
-            .or_default()
-            .clone()
+    fn configure_providers_mouse_state(&mut self) -> MouseStateHandle {
+        self.configure_providers_mouse_state.clone()
     }
 
     fn set_expanded(&mut self, id: &MonitorNodeId, expanded: bool) {
@@ -1895,12 +1880,11 @@ fn render_vertical_tabs_panel(
     .with_overlayed_scrollbar()
     .finish();
 
-    // Providers hub stays fixed above the scroll list so Launch is always
-    // visible (scroll position must not hide the connection surface).
+    // Rail stays clean: only search + agent/session tabs. Provider connection
+    // lives in Settings → Agents → Third party CLI agents.
     let panel_content = Flex::column()
         .with_main_axis_size(MainAxisSize::Max)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-        .with_child(render_agent_provider_hub(state, app))
         .with_child(render_control_bar(
             state,
             workspace,
@@ -2293,10 +2277,8 @@ const AGENT_MONITOR_AVATAR_SIZE: f32 = 20.;
 const AGENT_MONITOR_TREE_GUIDE_WIDTH: f32 = 14.;
 const AGENT_MONITOR_EMPTY_STATE_TITLE: &str = "Agents";
 const AGENT_MONITOR_EMPTY_STATE_MESSAGE: &str =
-    "Enable a provider below, then Launch — or start a CLI in any terminal.";
-const AGENT_PROVIDER_HUB_TITLE: &str = "Providers";
-const AGENT_PROVIDER_HUB_HINT: &str =
-    "Connect CLIs here, then Launch. Warp observes; the CLI owns the model.";
+    "Active CLI sessions appear here. Configure providers in Settings → Agents.";
+const AGENT_MONITOR_CONFIGURE_PROVIDERS_LABEL: &str = "Configure providers";
 
 fn render_agent_monitor_separator(theme: &WarpTheme) -> Box<dyn Element> {
     Container::new(
@@ -2318,13 +2300,49 @@ fn render_agent_monitor_separator(theme: &WarpTheme) -> Box<dyn Element> {
 
 /// The monitor remains visible before its first conversation so users can
 /// discover where agent work will appear without inventing sample agents.
-fn render_agent_monitor_empty_state(appearance: &Appearance) -> Box<dyn Element> {
+fn render_agent_monitor_empty_state(
+    state: &VerticalTabsPanelState,
+    appearance: &Appearance,
+) -> Box<dyn Element> {
     let theme = appearance.theme();
+    let configure_ms = state
+        .agent_monitor
+        .borrow_mut()
+        .configure_providers_mouse_state();
+    let configure = Hoverable::new(configure_ms, move |mouse_state| {
+        let color = if mouse_state.is_hovered() {
+            theme.active_ui_text_color()
+        } else {
+            theme.nonactive_ui_text_color()
+        };
+        Container::new(
+            Text::new_inline(
+                AGENT_MONITOR_CONFIGURE_PROVIDERS_LABEL,
+                appearance.ui_font_family(),
+                10.,
+            )
+            .with_color(color.into())
+            .finish(),
+        )
+        .with_horizontal_padding(6.)
+        .with_vertical_padding(3.)
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+        .with_background(internal_colors::fg_overlay_2(theme))
+        .finish()
+    })
+    .with_cursor(Cursor::PointingHand)
+    .on_click(|ctx, _, _| {
+        ctx.dispatch_typed_action(WorkspaceAction::ShowSettingsPage(
+            crate::settings_view::SettingsSection::ThirdPartyCLIAgents,
+        ));
+    })
+    .finish();
+
     Container::new(
         Flex::column()
             .with_main_axis_size(MainAxisSize::Min)
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_spacing(2.)
+            .with_spacing(4.)
             .with_child(
                 Text::new_inline(
                     AGENT_MONITOR_EMPTY_STATE_TITLE,
@@ -2343,6 +2361,7 @@ fn render_agent_monitor_empty_state(appearance: &Appearance) -> Box<dyn Element>
                 .with_color(theme.sub_text_color(theme.background()).into())
                 .finish(),
             )
+            .with_child(configure)
             .finish(),
     )
     .with_padding(Padding::uniform(8.).with_bottom(6.))
@@ -2355,174 +2374,11 @@ fn render_agent_monitor_section(
     projection: &AgentTabsProjection,
     app: &AppContext,
 ) -> Box<dyn Element> {
-    // Providers hub is fixed above the control bar (see render_vertical_tabs_panel).
-    // This section only renders live agent rows / empty state inside the scroll list.
     if projection.nodes.is_empty() {
-        render_agent_monitor_empty_state(Appearance::as_ref(app))
+        render_agent_monitor_empty_state(state, Appearance::as_ref(app))
     } else {
         render_agent_monitor(state, workspace, projection, app)
     }
-}
-
-fn active_sessions_by_provider(app: &AppContext) -> HashMap<AgentProviderId, usize> {
-    let mut counts = HashMap::new();
-    for (_, session) in CLIAgentSessionsModel::as_ref(app).sessions_snapshot() {
-        if let Some(id) = AgentProviderId::from_cli(session.agent) {
-            *counts.entry(id).or_default() += 1;
-        }
-    }
-    counts
-}
-
-fn render_agent_provider_hub(
-    state: &VerticalTabsPanelState,
-    app: &AppContext,
-) -> Box<dyn Element> {
-    let appearance = Appearance::as_ref(app);
-    let theme = appearance.theme();
-    let prefs = AgentProviderHubPrefs::load_default();
-    let active = active_sessions_by_provider(app);
-    let rows = provider_hub_rows(&prefs, &active, command_on_path);
-
-    let mut column = Flex::column()
-        .with_main_axis_size(MainAxisSize::Min)
-        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-        .with_spacing(2.)
-        .with_child(
-            Text::new_inline(
-                AGENT_PROVIDER_HUB_TITLE,
-                appearance.ui_font_family(),
-                12.,
-            )
-            .with_color(theme.active_ui_text_color().into())
-            .finish(),
-        )
-        .with_child(
-            Text::new_inline(AGENT_PROVIDER_HUB_HINT, appearance.ui_font_family(), 10.)
-                .with_color(theme.sub_text_color(theme.background()).into())
-                .finish(),
-        );
-
-    for row in rows {
-        let (toggle_ms, launch_ms) = {
-            let mut monitor = state.agent_monitor.borrow_mut();
-            (
-                monitor.provider_toggle_mouse_state(row.id),
-                monitor.provider_launch_mouse_state(row.id),
-            )
-        };
-        column.add_child(render_agent_provider_row(
-            row, appearance, theme, toggle_ms, launch_ms,
-        ));
-    }
-
-    Container::new(column.finish())
-        .with_padding(Padding::uniform(8.).with_bottom(4.))
-        .finish()
-}
-
-fn render_agent_provider_row(
-    row: ProviderHubRow,
-    appearance: &Appearance,
-    theme: &WarpTheme,
-    toggle_mouse_state: MouseStateHandle,
-    launch_mouse_state: MouseStateHandle,
-) -> Box<dyn Element> {
-    let status_label = match (row.enabled, row.install, row.active_sessions) {
-        (_, _, n) if n > 0 => format!("{n} active"),
-        (false, _, _) => "off".to_string(),
-        (true, ProviderInstallState::Ready, _) => "ready".to_string(),
-        (true, ProviderInstallState::Missing, _) => "not installed".to_string(),
-    };
-    let status_color = match (row.enabled, row.install, row.active_sessions) {
-        (_, _, n) if n > 0 => theme.ansi_fg_green(),
-        (false, _, _) => theme.nonactive_ui_text_color().into(),
-        (true, ProviderInstallState::Ready, _) => theme.ansi_fg_green(),
-        (true, ProviderInstallState::Missing, _) => theme.ansi_fg_yellow(),
-    };
-    let enable_label = if row.enabled { "On" } else { "Off" };
-    let provider = row.id;
-    let enabled = row.enabled;
-    let name_color = if row.enabled {
-        theme.active_ui_text_color()
-    } else {
-        theme.nonactive_ui_text_color()
-    };
-
-    let toggle = Hoverable::new(toggle_mouse_state, move |mouse_state| {
-        let color = if mouse_state.is_hovered() {
-            theme.active_ui_text_color()
-        } else {
-            theme.nonactive_ui_text_color()
-        };
-        Container::new(
-            Text::new_inline(enable_label, appearance.ui_font_family(), 10.)
-                .with_color(color.into())
-                .finish(),
-        )
-        .with_horizontal_padding(4.)
-        .with_vertical_padding(2.)
-        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
-        .finish()
-    })
-    .with_cursor(Cursor::PointingHand)
-    .on_click(move |ctx, _, _| {
-        ctx.dispatch_typed_action(WorkspaceAction::SetAgentProviderEnabled {
-            provider,
-            enabled: !enabled,
-        });
-    })
-    .finish();
-
-    let launch = Hoverable::new(launch_mouse_state, move |mouse_state| {
-        let color = if mouse_state.is_hovered() {
-            theme.active_ui_text_color()
-        } else {
-            theme.nonactive_ui_text_color()
-        };
-        Container::new(
-            Text::new_inline("Launch", appearance.ui_font_family(), 10.)
-                .with_color(color.into())
-                .finish(),
-        )
-        .with_horizontal_padding(6.)
-        .with_vertical_padding(2.)
-        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
-        .with_background(internal_colors::fg_overlay_2(theme))
-        .finish()
-    })
-    .with_cursor(Cursor::PointingHand)
-    .on_click(move |ctx, _, _| {
-        ctx.dispatch_typed_action(WorkspaceAction::LaunchAgentProvider { provider });
-    })
-    .finish();
-
-    Container::new(
-        Flex::row()
-            .with_main_axis_size(MainAxisSize::Max)
-            .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_spacing(6.)
-            .with_child(
-                Shrinkable::new(
-                    1.,
-                    Text::new_inline(row.id.display_name(), appearance.ui_font_family(), 11.)
-                        .with_clip(ClipConfig::ellipsis())
-                        .with_color(name_color.into())
-                        .finish(),
-                )
-                .finish(),
-            )
-            .with_child(
-                Text::new_inline(status_label, appearance.ui_font_family(), 10.)
-                    .with_color(status_color.into())
-                    .finish(),
-            )
-            .with_child(toggle)
-            .with_child(launch)
-            .finish(),
-    )
-    .with_uniform_padding(2.)
-    .finish()
 }
 
 /// Returns only rows whose known ancestors are expanded.  The projection is

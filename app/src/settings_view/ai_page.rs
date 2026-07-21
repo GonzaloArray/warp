@@ -7467,6 +7467,162 @@ pub(crate) fn cli_agent_settings_widget_id() -> &'static str {
     CLIAgentWidget::static_widget_id()
 }
 
+/// Provider connection catalog for Settings (not the vertical-tabs rail).
+fn render_agent_provider_hub_settings(
+    appearance: &Appearance,
+    app: &AppContext,
+) -> Box<dyn Element> {
+    use std::collections::HashMap;
+
+    use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
+    use crate::workspace::WorkspaceAction;
+    use crate::workspace::agent_provider_hub::{
+        AgentProviderHubPrefs, AgentProviderId, ProviderInstallState, command_on_path,
+        provider_hub_rows,
+    };
+
+    let theme = appearance.theme();
+    let prefs = AgentProviderHubPrefs::load_default();
+    let mut active = HashMap::new();
+    for (_, session) in CLIAgentSessionsModel::as_ref(app).sessions_snapshot() {
+        if let Some(id) = AgentProviderId::from_cli(session.agent) {
+            *active.entry(id).or_default() += 1;
+        }
+    }
+    let rows = provider_hub_rows(&prefs, &active, command_on_path);
+
+    let mut column = Flex::column()
+        .with_spacing(6.)
+        .with_child(
+            build_sub_header(
+                appearance,
+                "Providers",
+                Some(styles::header_font_color(true, app)),
+            )
+            .finish(),
+        )
+        .with_child(
+            Container::new(
+                Text::new_inline(
+                    "Enable CLIs Warp should observe and Launch them in a new terminal. Auth and models stay with each CLI.",
+                    appearance.ui_font_family(),
+                    appearance.ui_font_size() - 1.,
+                )
+                .with_color(styles::description_font_color(true, app).into())
+                .finish(),
+            )
+            .with_margin_bottom(6.)
+            .finish(),
+        );
+
+    for row in rows {
+        let status_label = match (row.enabled, row.install, row.active_sessions) {
+            (_, _, n) if n > 0 => format!("{n} active"),
+            (false, _, _) => "off".to_string(),
+            (true, ProviderInstallState::Ready, _) => "ready".to_string(),
+            (true, ProviderInstallState::Missing, _) => "not installed".to_string(),
+        };
+        let status_color = match (row.enabled, row.install, row.active_sessions) {
+            (_, _, n) if n > 0 => theme.ansi_fg_green(),
+            (false, _, _) => theme.nonactive_ui_text_color().into(),
+            (true, ProviderInstallState::Ready, _) => theme.ansi_fg_green(),
+            (true, ProviderInstallState::Missing, _) => theme.ansi_fg_yellow(),
+        };
+        let enable_label = if row.enabled { "On" } else { "Off" };
+        let provider = row.id;
+        let enabled = row.enabled;
+        let name_color = if row.enabled {
+            theme.active_ui_text_color()
+        } else {
+            theme.nonactive_ui_text_color()
+        };
+
+        let toggle = Hoverable::new(MouseStateHandle::default(), move |mouse_state| {
+            let color = if mouse_state.is_hovered() {
+                theme.active_ui_text_color()
+            } else {
+                theme.nonactive_ui_text_color()
+            };
+            Container::new(
+                Text::new_inline(enable_label, appearance.ui_font_family(), 11.)
+                    .with_color(color.into())
+                    .finish(),
+            )
+            .with_horizontal_padding(6.)
+            .with_vertical_padding(3.)
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+            .finish()
+        })
+        .with_cursor(Cursor::PointingHand)
+        .on_click(move |ctx, _, _| {
+            ctx.dispatch_typed_action(WorkspaceAction::SetAgentProviderEnabled {
+                provider,
+                enabled: !enabled,
+            });
+        })
+        .finish();
+
+        let launch = Hoverable::new(MouseStateHandle::default(), move |mouse_state| {
+            let color = if mouse_state.is_hovered() {
+                theme.active_ui_text_color()
+            } else {
+                theme.nonactive_ui_text_color()
+            };
+            Container::new(
+                Text::new_inline("Launch", appearance.ui_font_family(), 11.)
+                    .with_color(color.into())
+                    .finish(),
+            )
+            .with_horizontal_padding(8.)
+            .with_vertical_padding(3.)
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+            .with_background(internal_colors::fg_overlay_2(theme))
+            .finish()
+        })
+        .with_cursor(Cursor::PointingHand)
+        .on_click(move |ctx, _, _| {
+            ctx.dispatch_typed_action(WorkspaceAction::LaunchAgentProvider { provider });
+        })
+        .finish();
+
+        column.add_child(
+            Container::new(
+                Flex::row()
+                    .with_main_axis_size(MainAxisSize::Max)
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .with_spacing(8.)
+                    .with_child(
+                        Shrinkable::new(
+                            1.,
+                            Text::new_inline(
+                                row.id.display_name(),
+                                appearance.ui_font_family(),
+                                appearance.ui_font_size(),
+                            )
+                            .with_color(name_color.into())
+                            .finish(),
+                        )
+                        .finish(),
+                    )
+                    .with_child(
+                        Text::new_inline(status_label, appearance.ui_font_family(), 11.)
+                            .with_color(status_color.into())
+                            .finish(),
+                    )
+                    .with_child(toggle)
+                    .with_child(launch)
+                    .finish(),
+            )
+            .with_uniform_padding(4.)
+            .finish(),
+        );
+    }
+
+    Container::new(column.finish())
+        .with_margin_bottom(styles::DESCRIPTION_MARGIN_BOTTOM + 8.)
+        .finish()
+}
+
 #[derive(Default)]
 struct CLIAgentWidget {
     cli_agent_footer_toggle: SwitchStateHandle,
@@ -7481,7 +7637,7 @@ impl SettingsWidget for CLIAgentWidget {
     type View = AISettingsPageView;
 
     fn search_terms(&self) -> &str {
-        "third party cli coding agent claude codex gemini toolbar footer layout chip chips rearrange re-arrange bar command regex auto show rich input dismiss ctrl enter submit newline"
+        "third party cli coding agent claude codex gemini grok kimi minimax providers launch connect toolbar footer layout chip chips rearrange re-arrange bar command regex auto show rich input dismiss ctrl enter submit newline"
     }
 
     fn render(
@@ -7538,6 +7694,7 @@ impl SettingsWidget for CLIAgentWidget {
                 .with_padding_bottom(HEADER_PADDING)
                 .finish(),
             )
+            .with_child(render_agent_provider_hub_settings(appearance, app))
             .with_child(cli_agent_footer_toggle)
             .with_child(
                 Container::new(description.finish())
