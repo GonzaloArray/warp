@@ -113,6 +113,19 @@ impl AgentProviderId {
         }
     }
 
+    /// Brand icon for menus when available; falls back to a generic agent icon.
+    pub(crate) fn menu_icon(self) -> warp_core::ui::icons::Icon {
+        use warp_core::ui::icons::Icon;
+        match self {
+            Self::Claude => Icon::ClaudeLogo,
+            Self::Codex => Icon::OpenAILogo,
+            Self::Gemini => Icon::GeminiLogo,
+            Self::OpenCode => Icon::OpenCodeLogo,
+            Self::Cursor => Icon::CursorLogo,
+            Self::Copilot => Icon::CopilotLogo,
+            Self::Grok | Self::Kimi | Self::MiniMax | Self::Hermes => Icon::AiAssistant,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -1819,12 +1819,15 @@ fn render_new_tab_button(
         let contents = if hover_state.is_hovered() {
             let tooltip = if let Some(sublabel) = tab_configs_keybinding.clone() {
                 ui_builder
-                    .tool_tip_with_sublabel("Tab configs".to_string(), sublabel)
+                    .tool_tip_with_sublabel(
+                        "New session / Launch agent".to_string(),
+                        sublabel,
+                    )
                     .build()
                     .finish()
             } else {
                 ui_builder
-                    .tool_tip("Tab configs".to_string())
+                    .tool_tip("New session / Launch agent".to_string())
                     .build()
                     .finish()
             };
@@ -2277,7 +2280,7 @@ const AGENT_MONITOR_AVATAR_SIZE: f32 = 20.;
 const AGENT_MONITOR_TREE_GUIDE_WIDTH: f32 = 14.;
 const AGENT_MONITOR_EMPTY_STATE_TITLE: &str = "Agents";
 const AGENT_MONITOR_EMPTY_STATE_MESSAGE: &str =
-    "Active CLI sessions appear here. Configure providers in Settings → Agents.";
+    "Use + to Launch Claude, Codex, Grok… Active sessions appear here.";
 const AGENT_MONITOR_CONFIGURE_PROVIDERS_LABEL: &str = "Configure providers";
 
 fn render_agent_monitor_separator(theme: &WarpTheme) -> Box<dyn Element> {

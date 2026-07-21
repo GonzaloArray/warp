@@ -245,7 +245,7 @@ fn agent_monitor_empty_state_identifies_the_agents_section_without_sample_data()
     assert_eq!(AGENT_MONITOR_EMPTY_STATE_TITLE, "Agents");
     assert_eq!(
         AGENT_MONITOR_EMPTY_STATE_MESSAGE,
-        "Active CLI sessions appear here. Configure providers in Settings → Agents."
+        "Use + to Launch Claude, Codex, Grok… Active sessions appear here."
     );
 }
 

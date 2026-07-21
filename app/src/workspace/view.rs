@@ -6775,6 +6775,33 @@ impl Workspace {
             }
         }
 
+        // 2b. External CLI agents — quick launch (Claude, Codex, Grok, …).
+        // Preferences live in Settings; this menu is the fast path.
+        {
+            use crate::workspace::agent_provider_hub::{
+                AgentProviderHubPrefs, AgentProviderId,
+            };
+
+            let prefs = AgentProviderHubPrefs::load_default();
+            let mut providers: Vec<AgentProviderId> = AgentProviderId::ALL
+                .into_iter()
+                .filter(|id| prefs.is_enabled(*id))
+                .collect();
+            if providers.is_empty() {
+                providers = AgentProviderId::DEFAULT_ENABLED.to_vec();
+            }
+
+            menu_items.push(MenuItem::Separator);
+            for provider in providers {
+                menu_items.push(
+                    MenuItemFields::new(provider.display_name())
+                        .with_on_select_action(WorkspaceAction::LaunchAgentProvider { provider })
+                        .with_icon(provider.menu_icon())
+                        .into_item(),
+                );
+            }
+        }
+
         // 3. Cloud Agent (if flags enabled)
         if is_any_ai_enabled
             && FeatureFlag::AgentView.is_enabled()
