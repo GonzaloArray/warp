@@ -2525,6 +2525,17 @@ impl BlocklistAIHistoryModel {
             .filter(|m| !m.is_ambient_agent_conversation() && !m.is_child_agent_conversation())
     }
 
+    /// Returns every conversation identity known to storage or orchestration topology,
+    /// including non-navigable and not-yet-loaded children.
+    pub(crate) fn all_known_conversation_ids(&self) -> impl Iterator<Item = AIConversationId> + '_ {
+        self.all_conversations_metadata
+            .keys()
+            .chain(self.conversations_by_id.keys())
+            .chain(self.children_by_parent.keys())
+            .chain(self.children_by_parent.values().flatten())
+            .copied()
+    }
+
     /// Returns conversation metadata for a specific conversation ID.
     pub fn get_conversation_metadata(
         &self,

@@ -11,6 +11,7 @@ use warpui::geometry::vector::Vector2F;
 use warpui::platform::Cursor;
 use warpui::{EntityId, WeakViewHandle, WindowId};
 
+use super::agent_tabs_projection::MonitorNodeId;
 use super::global_actions::{ForkFromExchange, ForkedConversationDestination};
 use super::tab_settings::{
     VerticalTabsCompactSubtitle, VerticalTabsDisplayGranularity, VerticalTabsPrimaryInfo,
@@ -167,6 +168,23 @@ pub enum WorkspaceAction {
         tab_index: usize,
         target: VerticalTabsPaneContextMenuTarget,
         position: Vector2F,
+    },
+    /// Opens the local-only identity editor for a trusted agent-monitor node.
+    /// `provider` and `agent_key` are stable profile identity parts; the
+    /// fallback label is presentation-only and never used as an identity.
+    OpenAgentMonitorProfileEditor {
+        provider: String,
+        agent_key: String,
+        fallback_name: String,
+    },
+    /// Opens a new terminal and launches the selected external agent CLI.
+    LaunchAgentProvider {
+        provider: crate::workspace::agent_provider_hub::AgentProviderId,
+    },
+    /// Enables or disables a provider in the monitor hub preference list.
+    SetAgentProviderEnabled {
+        provider: crate::workspace::agent_provider_hub::AgentProviderId,
+        enabled: bool,
     },
     TabHoverWidthStart {
         width: f32,
@@ -477,6 +495,15 @@ pub enum WorkspaceAction {
     FocusLeftPanel,
     /// Moves focus to the panel on the right
     FocusRightPanel,
+    /// Moves keyboard focus to the hierarchical agent monitor in vertical tabs.
+    FocusAgentMonitor,
+    /// Changes an agent monitor disclosure state in the Workspace so its rail
+    /// is rerendered even when the focused child itself is otherwise empty.
+    SetAgentMonitorExpanded {
+        node_id: MonitorNodeId,
+        expanded: bool,
+        accessibility_label: String,
+    },
     /// An action to view a newly created/edited workflow in WD from the toast
     ViewObjectInWarpDrive(WarpDriveItemId),
     /// Open the object's sharing settings in WD.
@@ -1126,6 +1153,8 @@ impl WorkspaceAction {
             | ReopenClosedSession
             | FocusLeftPanel
             | FocusRightPanel
+            | FocusAgentMonitor
+            | SetAgentMonitorExpanded { .. }
             | DumpDebugInfo
             | LogReviewCommentSendStatusForActiveTab
             | ToggleRecordingMode
@@ -1232,7 +1261,10 @@ impl WorkspaceAction {
             FileRenamed { .. } => false, // File rename doesn't change workspace state
             #[cfg(feature = "local_fs")]
             FileDeleted { .. } => false, // File deletion doesn't change workspace state
-            OpenEnvironmentManagementPane => false,
+            OpenEnvironmentManagementPane
+            | OpenAgentMonitorProfileEditor { .. }
+            | LaunchAgentProvider { .. }
+            | SetAgentProviderEnabled { .. } => false,
             #[cfg(target_os = "linux")]
             DismissWaylandCrashRecoveryBannerAndOpenLink => false,
             #[cfg(target_family = "wasm")]

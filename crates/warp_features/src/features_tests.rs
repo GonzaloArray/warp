@@ -18,3 +18,18 @@ fn local_child_harnesses_are_local_only_by_default() {
     assert!(!DEBUG_FLAGS.contains(&FeatureFlag::LocalClaudeCodexChildHarnesses));
     assert!(!DOGFOOD_FLAGS.contains(&FeatureFlag::LocalClaudeCodexChildHarnesses));
 }
+
+#[test]
+fn agent_task_hierarchy_is_runtime_switchable_and_default_off() {
+    assert!(RUNTIME_FEATURE_FLAGS.contains(&FeatureFlag::AgentTaskHierarchy));
+    assert!(!DEBUG_FLAGS.contains(&FeatureFlag::AgentTaskHierarchy));
+    assert!(!LOCAL_FLAGS.contains(&FeatureFlag::AgentTaskHierarchy));
+    assert!(!DOGFOOD_FLAGS.contains(&FeatureFlag::AgentTaskHierarchy));
+    assert!(!PREVIEW_FLAGS.contains(&FeatureFlag::AgentTaskHierarchy));
+    assert!(!RELEASE_FLAGS.contains(&FeatureFlag::AgentTaskHierarchy));
+}
+
+#[test]
+fn agent_monitor_is_not_runtime_gated() {
+    assert!(!RUNTIME_FEATURE_FLAGS.contains(&FeatureFlag::AgentMonitor));
+}

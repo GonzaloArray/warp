@@ -539,6 +539,12 @@ pub enum FeatureFlag {
     /// Agent Management Details View - enables new details panel on card click.
     AgentManagementDetailsView,
 
+    /// Enables the hierarchical native Oz task list in Agent Management.
+    AgentTaskHierarchy,
+
+    /// Enables the agent monitor shell in Agent Management.
+    AgentMonitor,
+
     /// Enables scheduled ambient agents.
     ScheduledAmbientAgents,
 
@@ -1017,7 +1023,10 @@ pub const RELEASE_FLAGS: &[FeatureFlag] = &[
 ];
 
 /// Flags that we want to allow to switch at runtime (assuming RuntimeFeatureFlags is set)
-pub const RUNTIME_FEATURE_FLAGS: &[FeatureFlag] = &[FeatureFlag::LocalClaudeCodexChildHarnesses];
+pub const RUNTIME_FEATURE_FLAGS: &[FeatureFlag] = &[
+    FeatureFlag::LocalClaudeCodexChildHarnesses,
+    FeatureFlag::AgentTaskHierarchy,
+];
 
 impl FeatureFlag {
     pub fn is_enabled(&self) -> bool {

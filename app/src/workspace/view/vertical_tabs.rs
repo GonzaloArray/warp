@@ -1,8 +1,9 @@
 pub mod telemetry;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use languages::language_by_local_filename;
@@ -15,17 +16,19 @@ use warp_core::telemetry::TelemetryEvent as _;
 use warp_core::ui::Icon as WarpIcon;
 use warp_core::ui::color::blend::Blend;
 use warp_core::ui::color::coloru_with_opacity;
+use warp_core::ui::icons::Icon as CoreIcon;
 use warp_core::ui::theme::color::internal_colors;
 use warp_core::ui::theme::{AnsiColorIdentifier, Fill as WarpThemeFill, WarpTheme};
+use warpui::accessibility::{AccessibilityContent, WarpA11yRole};
 use warpui::elements::{
-    Border, ChildAnchor, Clipped, ClippedScrollStateHandle, ClippedScrollable, ConstrainedBox,
-    Container, CornerRadius, CrossAxisAlignment, DispatchEventResult, DragAxis, DragBarSide,
-    Draggable, DropShadow, DropTarget, Element, Empty, EventHandler, Expanded, Fill as ElementFill,
-    Flex, Hoverable, MainAxisAlignment, MainAxisSize, MouseStateHandle, OffsetPositioning, Padding,
-    ParentAnchor, ParentElement, ParentOffsetBounds, PositionedElementAnchor,
-    PositionedElementOffsetBounds, Radius, Resizable, ResizableStateHandle, SavePosition,
-    ScrollTarget, ScrollToPositionMode, ScrollbarWidth, Shrinkable, Stack, Text,
-    resizable_state_handle,
+    Border, ChildAnchor, ChildView, Clipped, ClippedScrollStateHandle, ClippedScrollable,
+    ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, DispatchEventResult, DragAxis,
+    DragBarSide, Draggable, DropShadow, DropTarget, Element, Empty, EventHandler, Expanded,
+    Fill as ElementFill, Flex, Hoverable, MainAxisAlignment, MainAxisSize, MouseStateHandle,
+    OffsetPositioning, Padding, ParentAnchor, ParentElement, ParentOffsetBounds,
+    PositionedElementAnchor, PositionedElementOffsetBounds, Radius, Resizable,
+    ResizableStateHandle, SavePosition, ScrollTarget, ScrollToPositionMode, ScrollbarWidth,
+    Shrinkable, Stack, Text, resizable_state_handle,
 };
 use warpui::fonts::{Properties, Weight};
 use warpui::platform::Cursor;
@@ -33,11 +36,19 @@ use warpui::prelude::Align;
 use warpui::text_layout::ClipConfig;
 use warpui::ui_components::components::{UiComponent, UiComponentStyles};
 use warpui::ui_components::text_input::TextInput;
-use warpui::{AppContext, EntityId, SingletonEntity, ViewHandle, WindowId};
+use warpui::{
+    AppContext, BlurContext, Entity, EntityId, FocusContext, SingletonEntity, View, ViewContext,
+    ViewHandle, WeakViewHandle, WindowId,
+};
 
 use super::{render_group_member_icon_collage, select_unique_pane_kinds};
+use crate::ai::active_agent_views_model::ActiveAgentViewsModel;
 use crate::ai::agent::conversation::{ConversationStatus, StatusColorStyle};
+use crate::ai::agent_conversations_model::{
+    AgentConversationNavigationSubject, AgentConversationsModel,
+};
 use crate::ai::agent_management::AgentNotificationsModel;
+use crate::ai::agent_management::profiles::{AgentProfile, AgentProfileStore, AvatarKind, Palette};
 use crate::ai::cloud_environments::CloudAmbientAgentEnvironment;
 use crate::ai::conversation_status_ui::render_status_element;
 use crate::appearance::Appearance;
@@ -62,12 +73,20 @@ use crate::terminal::view::TerminalViewState;
 use crate::terminal::{CLIAgent, TerminalView};
 use crate::themes::theme::Fill as ThemeFill;
 use crate::ui_components::agent_icon::terminal_view_agent_icon_variant;
+use crate::ui_components::avatar::{Avatar, AvatarContent};
 use crate::ui_components::buttons::combo_inner_button;
 use crate::ui_components::icon_with_status::{IconWithStatusVariant, render_icon_with_status};
 use crate::ui_components::icons::Icon as UiIcon;
 use crate::util::bindings::keybinding_name_to_display_string;
 use crate::util::color::Opacity;
-use crate::workspace::action::{NewSessionMenuAnchor, WorkspaceAction};
+use crate::workspace::action::{NewSessionMenuAnchor, RestoreConversationLayout, WorkspaceAction};
+use crate::workspace::agent_provider_hub::{
+    AgentProviderHubPrefs, AgentProviderId, ProviderHubRow, ProviderInstallState, command_on_path,
+    provider_hub_rows,
+};
+use crate::workspace::agent_tabs_projection::{
+    AgentTabKind, AgentTabNode, AgentTabStatus, AgentTabsProjection, MonitorNodeId,
+};
 use crate::workspace::cross_window_tab_drag::CrossWindowTabDrag;
 use crate::workspace::hoa_onboarding::HoaOnboardingStep;
 use crate::workspace::tab_group::{TabGroup, TabGroupId};
@@ -728,7 +747,187 @@ pub(super) struct VerticalTabsPanelState {
     show_diff_stats_mouse_state: MouseStateHandle,
     show_details_on_hover_mouse_state: MouseStateHandle,
     panel_right_click_mouse_state: MouseStateHandle,
+    agent_monitor: Rc<RefCell<AgentMonitorPanelState>>,
+    agent_monitor_focus: Option<ViewHandle<AgentMonitorFocusView>>,
     pub(super) show_settings_popup: bool,
+}
+
+#[derive(Default)]
+struct AgentMonitorPanelState {
+    expanded_node_ids: HashSet<MonitorNodeId>,
+    /// Nodes we have already auto-expanded once. Prevents re-opening after the
+    /// user collapses a root.
+    auto_expanded_node_ids: HashSet<MonitorNodeId>,
+    selected_node_id: Option<MonitorNodeId>,
+    row_mouse_states: HashMap<MonitorNodeId, MouseStateHandle>,
+    chevron_mouse_states: HashMap<MonitorNodeId, MouseStateHandle>,
+    customize_mouse_states: HashMap<MonitorNodeId, MouseStateHandle>,
+    provider_toggle_mouse_states: HashMap<AgentProviderId, MouseStateHandle>,
+    provider_launch_mouse_states: HashMap<AgentProviderId, MouseStateHandle>,
+    keyboard_target: Option<AgentMonitorKeyboardTarget>,
+}
+
+#[derive(Clone)]
+struct AgentMonitorKeyboardTarget {
+    node_id: MonitorNodeId,
+    has_children: bool,
+    navigation_action: Option<WorkspaceAction>,
+    accessibility_label: String,
+}
+
+struct AgentMonitorFocusView {
+    state: Rc<RefCell<AgentMonitorPanelState>>,
+    self_handle: WeakViewHandle<Self>,
+}
+
+impl Entity for AgentMonitorFocusView {
+    type Event = ();
+}
+
+impl View for AgentMonitorFocusView {
+    fn ui_name() -> &'static str {
+        "AgentMonitorFocus"
+    }
+
+    fn on_focus(&mut self, focus_ctx: &FocusContext, ctx: &mut ViewContext<Self>) {
+        if focus_ctx.is_self_focused() {
+            ctx.notify();
+        }
+    }
+
+    fn on_blur(&mut self, blur_ctx: &BlurContext, ctx: &mut ViewContext<Self>) {
+        if blur_ctx.is_self_blurred() {
+            ctx.notify();
+        }
+    }
+
+    fn accessibility_contents(&self, _: &AppContext) -> Option<AccessibilityContent> {
+        self.state.borrow().keyboard_target.as_ref().map(|target| {
+            AccessibilityContent::new(
+                target.accessibility_label.clone(),
+                "Use Enter or Space to select. Use Right Arrow to expand and Left Arrow to collapse.",
+                WarpA11yRole::ButtonRole,
+            )
+        })
+    }
+
+    fn render(&self, _app: &AppContext) -> Box<dyn Element> {
+        let state = self.state.clone();
+        let self_handle = self.self_handle.clone();
+        EventHandler::new(Empty::new().finish())
+            .on_keydown(move |ctx, app, keystroke| {
+                if !self_handle
+                    .upgrade(app)
+                    .is_some_and(|view| view.is_focused(app))
+                {
+                    return DispatchEventResult::PropagateToParent;
+                }
+                let Some(target) = state.borrow().keyboard_target.clone() else {
+                    return DispatchEventResult::PropagateToParent;
+                };
+                match agent_monitor_keyboard_action(&keystroke.key) {
+                    Some(AgentMonitorKeyboardAction::Activate) => {
+                        if let Some(action) = target.navigation_action {
+                            ctx.dispatch_typed_action(action);
+                            DispatchEventResult::StopPropagation
+                        } else {
+                            DispatchEventResult::PropagateToParent
+                        }
+                    }
+                    Some(AgentMonitorKeyboardAction::Expand) if target.has_children => {
+                        ctx.dispatch_typed_action(WorkspaceAction::SetAgentMonitorExpanded {
+                            node_id: target.node_id,
+                            expanded: true,
+                            accessibility_label: target.accessibility_label,
+                        });
+                        DispatchEventResult::StopPropagation
+                    }
+                    Some(AgentMonitorKeyboardAction::Collapse) if target.has_children => {
+                        ctx.dispatch_typed_action(WorkspaceAction::SetAgentMonitorExpanded {
+                            node_id: target.node_id,
+                            expanded: false,
+                            accessibility_label: target.accessibility_label,
+                        });
+                        DispatchEventResult::StopPropagation
+                    }
+                    _ => DispatchEventResult::PropagateToParent,
+                }
+            })
+            .finish()
+    }
+}
+
+impl AgentMonitorPanelState {
+    fn row_mouse_state(&mut self, id: MonitorNodeId) -> MouseStateHandle {
+        self.row_mouse_states.entry(id).or_default().clone()
+    }
+
+    fn chevron_mouse_state(&mut self, id: MonitorNodeId) -> MouseStateHandle {
+        self.chevron_mouse_states.entry(id).or_default().clone()
+    }
+
+    fn customize_mouse_state(&mut self, id: MonitorNodeId) -> MouseStateHandle {
+        self.customize_mouse_states.entry(id).or_default().clone()
+    }
+
+    fn provider_toggle_mouse_state(&mut self, id: AgentProviderId) -> MouseStateHandle {
+        self.provider_toggle_mouse_states
+            .entry(id)
+            .or_default()
+            .clone()
+    }
+
+    fn provider_launch_mouse_state(&mut self, id: AgentProviderId) -> MouseStateHandle {
+        self.provider_launch_mouse_states
+            .entry(id)
+            .or_default()
+            .clone()
+    }
+
+    fn set_expanded(&mut self, id: &MonitorNodeId, expanded: bool) {
+        if expanded {
+            self.expanded_node_ids.insert(id.clone());
+        } else {
+            self.expanded_node_ids.remove(id);
+            // Remember the collapse so reconcile does not force it open again.
+            self.auto_expanded_node_ids.insert(id.clone());
+        }
+    }
+
+    fn reconcile(
+        &mut self,
+        projection: &AgentTabsProjection,
+        active_node_id: Option<MonitorNodeId>,
+    ) {
+        let ids = projection
+            .nodes
+            .iter()
+            .map(|node| node.id.clone())
+            .collect::<HashSet<_>>();
+        self.row_mouse_states.retain(|id, _| ids.contains(id));
+        self.chevron_mouse_states.retain(|id, _| ids.contains(id));
+        self.customize_mouse_states.retain(|id, _| ids.contains(id));
+        self.expanded_node_ids.retain(|id| ids.contains(id));
+        self.auto_expanded_node_ids.retain(|id| ids.contains(id));
+        // First time we see a root with children, open the tree so subagents
+        // are visible without an extra click. Collapses are sticky via
+        // auto_expanded_node_ids.
+        for node in &projection.nodes {
+            if node.has_children
+                && node.depth == 0
+                && !self.auto_expanded_node_ids.contains(&node.id)
+            {
+                self.expanded_node_ids.insert(node.id.clone());
+                self.auto_expanded_node_ids.insert(node.id.clone());
+            }
+        }
+        // Selection is a projection of the terminal that is actually active,
+        // not a remembered click. This prevents a stale highlighted agent after
+        // the user navigates a normal terminal tab or the monitor refreshes.
+        self.selected_node_id = active_node_id.filter(|id| ids.contains(id));
+        // Keep expansion by canonical node ID across refreshes. In particular,
+        // do not rebuild it from row indices or display names.
+    }
 }
 
 impl Default for VerticalTabsPanelState {
@@ -766,12 +965,36 @@ impl Default for VerticalTabsPanelState {
             show_diff_stats_mouse_state: Default::default(),
             show_details_on_hover_mouse_state: Default::default(),
             panel_right_click_mouse_state: Default::default(),
+            agent_monitor: Rc::default(),
+            agent_monitor_focus: None,
             show_settings_popup: false,
         }
     }
 }
 
 impl VerticalTabsPanelState {
+    pub(super) fn attach_agent_monitor_focus(&mut self, ctx: &mut ViewContext<Workspace>) {
+        let state = self.agent_monitor.clone();
+        self.agent_monitor_focus = Some(ctx.add_view(move |ctx| AgentMonitorFocusView {
+            state,
+            self_handle: ctx.handle(),
+        }));
+    }
+
+    pub(super) fn focus_agent_monitor(&self, ctx: &mut ViewContext<Workspace>) -> bool {
+        let Some(focus) = &self.agent_monitor_focus else {
+            return false;
+        };
+        ctx.focus(focus);
+        true
+    }
+
+    pub(super) fn set_agent_monitor_expanded(&self, node_id: MonitorNodeId, expanded: bool) {
+        self.agent_monitor
+            .borrow_mut()
+            .set_expanded(&node_id, expanded);
+    }
+
     /// Returns a lightweight handle bundle for workspace-level visibility reconciliation while the
     /// detail sidecar is active.
     pub(super) fn detail_hover_state(&self, window_id: WindowId) -> VerticalTabsDetailHoverState {
@@ -1751,14 +1974,32 @@ fn render_groups(
     let appearance = Appearance::as_ref(app);
     let theme = appearance.theme();
 
+    // The agent monitor is part of vertical tabs, not a separate experimental
+    // screen. Keep the runtime flag for compatibility with existing settings,
+    // but never hide the primary navigation from a normal Warp launch.
+    let agent_projection = workspace.agent_tabs_projection(app);
+
     if workspace.tabs.is_empty() {
-        return Container::new(
-            Text::new_inline("No tabs open", appearance.ui_font_family(), 12.)
-                .with_color(theme.sub_text_color(theme.background()).into())
-                .finish(),
-        )
-        .with_padding(Padding::uniform(12.))
-        .finish();
+        let mut content = Flex::column()
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_child(render_agent_monitor_section(
+                state,
+                workspace,
+                &agent_projection,
+                app,
+            ));
+        content.add_child(render_agent_monitor_separator(theme));
+        content.add_child(
+            Container::new(
+                Text::new_inline("No tabs open", appearance.ui_font_family(), 12.)
+                    .with_color(theme.sub_text_color(theme.background()).into())
+                    .finish(),
+            )
+            .with_padding(Padding::uniform(12.))
+            .finish(),
+        );
+        return content.finish();
     }
 
     let resolved_mode = resolve_vertical_tabs_mode(app);
@@ -1885,9 +2126,9 @@ fn render_groups(
 
     if visible_tabs.is_empty() {
         if query.is_empty() {
-            return Empty::new().finish();
+            return render_agent_monitor_section(state, workspace, &agent_projection, app);
         } else {
-            return Container::new(
+            let no_match = Container::new(
                 Text::new_inline(
                     "No tabs match your search.",
                     appearance.ui_font_family(),
@@ -1898,6 +2139,18 @@ fn render_groups(
             )
             .with_padding(Padding::uniform(12.))
             .finish();
+            return Flex::column()
+                .with_main_axis_size(MainAxisSize::Min)
+                .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+                .with_child(render_agent_monitor_section(
+                    state,
+                    workspace,
+                    &agent_projection,
+                    app,
+                ))
+                .with_child(render_agent_monitor_separator(theme))
+                .with_child(no_match)
+                .finish();
         }
     }
 
@@ -1911,6 +2164,14 @@ fn render_groups(
     if !uses_outer_group_container {
         groups = groups.with_spacing(TABS_MODE_ITEM_SPACING);
     }
+
+    groups.add_child(render_agent_monitor_section(
+        state,
+        workspace,
+        &agent_projection,
+        app,
+    ));
+    groups.add_child(render_agent_monitor_separator(theme));
 
     // Consecutive tabs sharing a group_id collapse into a single group container.
     // TODO(johnturcoo) adopt horizontal tabs 'tab slot' pattern to remove this while loop.
@@ -2018,6 +2279,838 @@ fn render_groups(
             .with_padding(Padding::uniform(8.).with_top(0.))
             .finish()
     }
+}
+
+const AGENT_MONITOR_INDENT: f32 = 14.;
+const AGENT_MONITOR_AVATAR_SIZE: f32 = 20.;
+const AGENT_MONITOR_TREE_GUIDE_WIDTH: f32 = 14.;
+const AGENT_MONITOR_EMPTY_STATE_TITLE: &str = "Agents";
+const AGENT_MONITOR_EMPTY_STATE_MESSAGE: &str =
+    "Enable a provider below, then Launch — or start a CLI in any terminal.";
+const AGENT_PROVIDER_HUB_TITLE: &str = "Providers";
+const AGENT_PROVIDER_HUB_HINT: &str =
+    "Connect CLIs here, then Launch. Warp observes; the CLI owns the model.";
+
+fn render_agent_monitor_separator(theme: &WarpTheme) -> Box<dyn Element> {
+    Container::new(
+        ConstrainedBox::new(
+            Container::new(Empty::new().finish())
+                .with_background(internal_colors::fg_overlay_2(theme))
+                .finish(),
+        )
+        .with_height(1.)
+        .finish(),
+    )
+    .with_padding(
+        Padding::uniform(8.)
+            .with_left(GROUP_HORIZONTAL_PADDING)
+            .with_right(GROUP_HORIZONTAL_PADDING),
+    )
+    .finish()
+}
+
+/// The monitor remains visible before its first conversation so users can
+/// discover where agent work will appear without inventing sample agents.
+fn render_agent_monitor_empty_state(appearance: &Appearance) -> Box<dyn Element> {
+    let theme = appearance.theme();
+    Container::new(
+        Flex::column()
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_spacing(2.)
+            .with_child(
+                Text::new_inline(
+                    AGENT_MONITOR_EMPTY_STATE_TITLE,
+                    appearance.ui_font_family(),
+                    12.,
+                )
+                .with_color(theme.active_ui_text_color().into())
+                .finish(),
+            )
+            .with_child(
+                Text::new_inline(
+                    AGENT_MONITOR_EMPTY_STATE_MESSAGE,
+                    appearance.ui_font_family(),
+                    10.,
+                )
+                .with_color(theme.sub_text_color(theme.background()).into())
+                .finish(),
+            )
+            .finish(),
+    )
+    .with_padding(Padding::uniform(8.).with_bottom(6.))
+    .finish()
+}
+
+fn render_agent_monitor_section(
+    state: &VerticalTabsPanelState,
+    workspace: &Workspace,
+    projection: &AgentTabsProjection,
+    app: &AppContext,
+) -> Box<dyn Element> {
+    let appearance = Appearance::as_ref(app);
+    let mut section = Flex::column()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+        .with_spacing(4.)
+        .with_child(render_agent_provider_hub(state, app));
+    if projection.nodes.is_empty() {
+        section.add_child(render_agent_monitor_empty_state(appearance));
+    } else {
+        section.add_child(render_agent_monitor(state, workspace, projection, app));
+    }
+    section.finish()
+}
+
+fn active_sessions_by_provider(app: &AppContext) -> HashMap<AgentProviderId, usize> {
+    let mut counts = HashMap::new();
+    for (_, session) in CLIAgentSessionsModel::as_ref(app).sessions_snapshot() {
+        if let Some(id) = AgentProviderId::from_cli(session.agent) {
+            *counts.entry(id).or_default() += 1;
+        }
+    }
+    counts
+}
+
+fn render_agent_provider_hub(
+    state: &VerticalTabsPanelState,
+    app: &AppContext,
+) -> Box<dyn Element> {
+    let appearance = Appearance::as_ref(app);
+    let theme = appearance.theme();
+    let prefs = AgentProviderHubPrefs::load_default();
+    let active = active_sessions_by_provider(app);
+    let rows = provider_hub_rows(&prefs, &active, command_on_path);
+
+    let mut column = Flex::column()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+        .with_spacing(2.)
+        .with_child(
+            Text::new_inline(
+                AGENT_PROVIDER_HUB_TITLE,
+                appearance.ui_font_family(),
+                12.,
+            )
+            .with_color(theme.active_ui_text_color().into())
+            .finish(),
+        )
+        .with_child(
+            Text::new_inline(AGENT_PROVIDER_HUB_HINT, appearance.ui_font_family(), 10.)
+                .with_color(theme.sub_text_color(theme.background()).into())
+                .finish(),
+        );
+
+    for row in rows {
+        let (toggle_ms, launch_ms) = {
+            let mut monitor = state.agent_monitor.borrow_mut();
+            (
+                monitor.provider_toggle_mouse_state(row.id),
+                monitor.provider_launch_mouse_state(row.id),
+            )
+        };
+        column.add_child(render_agent_provider_row(
+            row, appearance, theme, toggle_ms, launch_ms,
+        ));
+    }
+
+    Container::new(column.finish())
+        .with_padding(Padding::uniform(8.).with_bottom(4.))
+        .finish()
+}
+
+fn render_agent_provider_row(
+    row: ProviderHubRow,
+    appearance: &Appearance,
+    theme: &WarpTheme,
+    toggle_mouse_state: MouseStateHandle,
+    launch_mouse_state: MouseStateHandle,
+) -> Box<dyn Element> {
+    let status_label = match (row.enabled, row.install, row.active_sessions) {
+        (_, _, n) if n > 0 => format!("{n} active"),
+        (false, _, _) => "off".to_string(),
+        (true, ProviderInstallState::Ready, _) => "ready".to_string(),
+        (true, ProviderInstallState::Missing, _) => "not installed".to_string(),
+    };
+    let status_color = match (row.enabled, row.install, row.active_sessions) {
+        (_, _, n) if n > 0 => theme.ansi_fg_green(),
+        (false, _, _) => theme.nonactive_ui_text_color().into(),
+        (true, ProviderInstallState::Ready, _) => theme.ansi_fg_green(),
+        (true, ProviderInstallState::Missing, _) => theme.ansi_fg_yellow(),
+    };
+    let enable_label = if row.enabled { "On" } else { "Off" };
+    let provider = row.id;
+    let enabled = row.enabled;
+    let name_color = if row.enabled {
+        theme.active_ui_text_color()
+    } else {
+        theme.nonactive_ui_text_color()
+    };
+
+    let toggle = Hoverable::new(toggle_mouse_state, move |mouse_state| {
+        let color = if mouse_state.is_hovered() {
+            theme.active_ui_text_color()
+        } else {
+            theme.nonactive_ui_text_color()
+        };
+        Container::new(
+            Text::new_inline(enable_label, appearance.ui_font_family(), 10.)
+                .with_color(color.into())
+                .finish(),
+        )
+        .with_horizontal_padding(4.)
+        .with_vertical_padding(2.)
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+        .finish()
+    })
+    .with_cursor(Cursor::PointingHand)
+    .on_click(move |ctx, _, _| {
+        ctx.dispatch_typed_action(WorkspaceAction::SetAgentProviderEnabled {
+            provider,
+            enabled: !enabled,
+        });
+    })
+    .finish();
+
+    let launch = Hoverable::new(launch_mouse_state, move |mouse_state| {
+        let color = if mouse_state.is_hovered() {
+            theme.active_ui_text_color()
+        } else {
+            theme.nonactive_ui_text_color()
+        };
+        Container::new(
+            Text::new_inline("Launch", appearance.ui_font_family(), 10.)
+                .with_color(color.into())
+                .finish(),
+        )
+        .with_horizontal_padding(6.)
+        .with_vertical_padding(2.)
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+        .with_background(internal_colors::fg_overlay_2(theme))
+        .finish()
+    })
+    .with_cursor(Cursor::PointingHand)
+    .on_click(move |ctx, _, _| {
+        ctx.dispatch_typed_action(WorkspaceAction::LaunchAgentProvider { provider });
+    })
+    .finish();
+
+    Container::new(
+        Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_spacing(6.)
+            .with_child(
+                Shrinkable::new(
+                    1.,
+                    Text::new_inline(row.id.display_name(), appearance.ui_font_family(), 11.)
+                        .with_clip(ClipConfig::ellipsis())
+                        .with_color(name_color.into())
+                        .finish(),
+                )
+                .finish(),
+            )
+            .with_child(
+                Text::new_inline(status_label, appearance.ui_font_family(), 10.)
+                    .with_color(status_color.into())
+                    .finish(),
+            )
+            .with_child(toggle)
+            .with_child(launch)
+            .finish(),
+    )
+    .with_uniform_padding(2.)
+    .finish()
+}
+
+/// Returns only rows whose known ancestors are expanded.  The projection is
+/// already in canonical topology order; this preserves it rather than sorting
+/// by profile name or title.
+fn visible_agent_monitor_nodes<'a>(
+    projection: &'a AgentTabsProjection,
+    expanded_node_ids: &HashSet<MonitorNodeId>,
+) -> Vec<&'a AgentTabNode> {
+    let by_id = projection
+        .nodes
+        .iter()
+        .map(|node| (node.id.clone(), node))
+        .collect::<HashMap<_, _>>();
+
+    projection
+        .nodes
+        .iter()
+        .filter(|node| {
+            let mut parent_id = node.parent_id.clone();
+            let mut ancestors = HashSet::new();
+            while let Some(id) = parent_id {
+                if !ancestors.insert(id.clone()) || !expanded_node_ids.contains(&id) {
+                    return false;
+                }
+                parent_id = by_id.get(&id).and_then(|parent| parent.parent_id.clone());
+            }
+            true
+        })
+        .collect()
+}
+
+/// Tree-guide prefix for nested rows: `├─` for siblings, `└─` for the last child.
+fn agent_monitor_tree_guide(
+    node: &AgentTabNode,
+    projection: &AgentTabsProjection,
+    appearance: &Appearance,
+    theme: &WarpTheme,
+) -> Box<dyn Element> {
+    if node.depth == 0 {
+        return ConstrainedBox::new(Empty::new().finish())
+            .with_width(0.)
+            .finish();
+    }
+    let siblings = projection
+        .nodes
+        .iter()
+        .filter(|candidate| candidate.parent_id == node.parent_id)
+        .map(|candidate| &candidate.id)
+        .collect::<Vec<_>>();
+    let is_last = siblings.last().is_some_and(|id| *id == &node.id);
+    let guide = if is_last { "└─" } else { "├─" };
+    Text::new_inline(guide, appearance.monospace_font_family(), 11.)
+        .with_color(theme.sub_text_color(theme.background()).into())
+        .finish()
+}
+
+fn agent_monitor_status_label(status: AgentTabStatus) -> &'static str {
+    match status {
+        AgentTabStatus::Working => "working",
+        AgentTabStatus::Waiting => "waiting",
+        AgentTabStatus::Blocked => "blocked",
+        AgentTabStatus::Completed => "completed",
+        AgentTabStatus::Failed => "attention",
+        AgentTabStatus::Unavailable => "unavailable",
+    }
+}
+
+fn agent_monitor_status_icon(status: AgentTabStatus) -> CoreIcon {
+    match status {
+        AgentTabStatus::Working => CoreIcon::Circle,
+        AgentTabStatus::Waiting => CoreIcon::Clock,
+        AgentTabStatus::Blocked => CoreIcon::MinusCircle,
+        AgentTabStatus::Completed => CoreIcon::Check,
+        AgentTabStatus::Failed => CoreIcon::AlertTriangle,
+        AgentTabStatus::Unavailable => CoreIcon::HelpCircle,
+    }
+}
+
+fn agent_monitor_status_color(status: AgentTabStatus, theme: &WarpTheme) -> ColorU {
+    match status {
+        AgentTabStatus::Working => theme.ansi_fg_green(),
+        AgentTabStatus::Waiting => theme.ansi_fg_yellow(),
+        AgentTabStatus::Blocked => theme.ansi_fg_yellow(),
+        AgentTabStatus::Completed => theme.ansi_fg_green(),
+        AgentTabStatus::Failed => theme.ansi_fg_red(),
+        AgentTabStatus::Unavailable => theme.nonactive_ui_text_color().into(),
+    }
+}
+
+fn agent_monitor_summary(node: &AgentTabNode, projection: &AgentTabsProjection) -> String {
+    let status = agent_monitor_status_label(node.status);
+    if !node.has_children {
+        return status.to_string();
+    }
+    let child_count = projection.direct_child_count(&node.id);
+    if child_count == 0 {
+        return status.to_string();
+    }
+    let counts = projection.child_status_counts(&node.id);
+    let mut parts = vec![status.to_string()];
+    parts.push(format!(
+        "{child_count} subagent{}",
+        if child_count == 1 { "" } else { "s" }
+    ));
+    if counts.working > 0 {
+        parts.push(format!("{} active", counts.working));
+    }
+    if counts.blocked > 0 {
+        parts.push(format!("{} blocked", counts.blocked));
+    }
+    if counts.failed > 0 {
+        parts.push(format!("{} failed", counts.failed));
+    }
+    parts.join(" · ")
+}
+
+fn agent_monitor_kind_icon(kind: AgentTabKind) -> CoreIcon {
+    match kind {
+        AgentTabKind::AgentRoot | AgentTabKind::ExternalSession => CoreIcon::AiAssistant,
+        AgentTabKind::Task => CoreIcon::TaskListBlock,
+        AgentTabKind::Subagent => CoreIcon::GitBranch,
+    }
+}
+
+/// The row and disclosure control deliberately expose different operations.
+/// Keeping these strings in one place prevents a future visual-only change
+/// from making keyboard instructions disagree with the actual tree contract.
+fn agent_monitor_control_label(
+    node: &AgentTabNode,
+    projection: &AgentTabsProjection,
+    expanded: bool,
+    disclosure: bool,
+) -> String {
+    let name = agent_monitor_fallback_name(node);
+    if disclosure {
+        format!(
+            "Disclosure button: {} {}",
+            if expanded { "Collapse" } else { "Expand" },
+            name
+        )
+    } else {
+        format!(
+            "Agent tab: Select {name}, {}. Press Enter or Space to open{}",
+            agent_monitor_summary(node, projection),
+            if node.has_children {
+                "; Right Arrow expands and Left Arrow collapses"
+            } else {
+                ""
+            }
+        )
+    }
+}
+
+fn agent_monitor_navigation_action(
+    node_id: &MonitorNodeId,
+    app: &AppContext,
+) -> Option<WorkspaceAction> {
+    match node_id {
+        MonitorNodeId::Oz(entry_id) => AgentConversationsModel::resolve_open_action(
+            AgentConversationNavigationSubject::Entry(*entry_id),
+            Some(RestoreConversationLayout::ActivePane),
+            app,
+        ),
+        // Children without their own pane focus the parent CLI terminal.
+        MonitorNodeId::External(terminal_view_id)
+        | MonitorNodeId::ExternalChild {
+            parent: terminal_view_id,
+            ..
+        } => Some(WorkspaceAction::FocusTerminalViewInWorkspace {
+            terminal_view_id: *terminal_view_id,
+        }),
+    }
+}
+
+fn agent_monitor_profile<'a>(
+    profiles: &'a AgentProfileStore,
+    node: &AgentTabNode,
+) -> Option<&'a AgentProfile> {
+    let provider = node
+        .external_provider
+        .map(|provider| provider.profile_provider())
+        .unwrap_or("oz");
+    node.profile_key
+        .as_ref()
+        .and_then(|key| profiles.profiles.get(&format!("{provider}:{key}")))
+}
+
+fn agent_monitor_fallback_name(node: &AgentTabNode) -> String {
+    match &node.id {
+        MonitorNodeId::ExternalChild { .. } => node.display_label.clone(),
+        _ => node
+            .external_provider
+            .map(|provider| provider.display_name().to_string())
+            .unwrap_or_else(|| node.display_label.clone()),
+    }
+}
+
+fn agent_monitor_display_name(profile: Option<&AgentProfile>, node: &AgentTabNode) -> String {
+    profile
+        .map(|profile| profile.display_name.clone())
+        .unwrap_or_else(|| agent_monitor_fallback_name(node))
+}
+
+/// Builds the profile-editor action from the node's stable profile identity.
+/// Display labels are deliberately passed only as an initial visual fallback;
+/// they must never determine which profile is opened or persisted.
+fn agent_monitor_customize_action(node: &AgentTabNode) -> Option<WorkspaceAction> {
+    let provider = node
+        .external_provider
+        .map(|provider| provider.profile_provider())
+        .unwrap_or("oz");
+    node.profile_key
+        .as_ref()
+        .map(|agent_key| WorkspaceAction::OpenAgentMonitorProfileEditor {
+            provider: provider.to_string(),
+            agent_key: agent_key.clone(),
+            fallback_name: agent_monitor_fallback_name(node),
+        })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AgentMonitorKeyboardAction {
+    Activate,
+    Expand,
+    Collapse,
+}
+
+/// Tree rows use the conventional keyboard contract: Enter/Space opens the
+/// selected agent, while Right/Left only changes its disclosure state.
+fn agent_monitor_keyboard_action(key: &str) -> Option<AgentMonitorKeyboardAction> {
+    match key {
+        "enter" | "space" => Some(AgentMonitorKeyboardAction::Activate),
+        "right" => Some(AgentMonitorKeyboardAction::Expand),
+        "left" => Some(AgentMonitorKeyboardAction::Collapse),
+        _ => None,
+    }
+}
+
+fn active_agent_monitor_node_id(
+    workspace: &Workspace,
+    projection: &AgentTabsProjection,
+    app: &AppContext,
+) -> Option<MonitorNodeId> {
+    let active_terminal_view_id = workspace.active_terminal_id(app)?;
+    let conversations = AgentConversationsModel::as_ref(app);
+    let active_views = ActiveAgentViewsModel::as_ref(app);
+
+    projection.nodes.iter().find_map(|node| match &node.id {
+        MonitorNodeId::External(terminal_view_id)
+            if *terminal_view_id == active_terminal_view_id =>
+        {
+            Some(node.id.clone())
+        }
+        MonitorNodeId::ExternalChild {
+            parent: terminal_view_id,
+            ..
+        } if *terminal_view_id == active_terminal_view_id => {
+            // Prefer the root when the parent terminal is active; children are
+            // selection-only when the user clicks them explicitly.
+            None
+        }
+        MonitorNodeId::Oz(entry_id) => conversations
+            .get_entry_by_id(entry_id, app)
+            .and_then(|entry| active_views.get_terminal_view_id_for_entry(&entry, app))
+            .filter(|terminal_view_id| *terminal_view_id == active_terminal_view_id)
+            .map(|_| node.id.clone()),
+        _ => None,
+    })
+}
+
+/// Keyboard focus needs a usable agent action even before a terminal has been
+/// opened for the monitor. Prefer the active mapping, then the first root in
+/// canonical projection order.
+fn agent_monitor_keyboard_node_id(
+    selected_node_id: Option<MonitorNodeId>,
+    projection: &AgentTabsProjection,
+) -> Option<MonitorNodeId> {
+    selected_node_id.or_else(|| {
+        projection
+            .nodes
+            .iter()
+            .find(|node| node.depth == 0)
+            .map(|node| node.id.clone())
+    })
+}
+
+fn render_agent_monitor_avatar(
+    profile: Option<&AgentProfile>,
+    fallback_name: &str,
+    appearance: &Appearance,
+) -> Box<dyn Element> {
+    let theme = appearance.theme();
+    let (content, background) = match profile {
+        Some(profile) => {
+            let content = match profile.icon {
+                AvatarKind::Initial => AvatarContent::DisplayName(profile.display_name.clone()),
+                AvatarKind::Assistant => AvatarContent::Icon(CoreIcon::AiAssistant),
+                AvatarKind::Code => AvatarContent::Icon(CoreIcon::Code2),
+                AvatarKind::Terminal => AvatarContent::Icon(CoreIcon::Terminal),
+            };
+            let background = match profile.palette {
+                Palette::Blue => theme.ansi_fg_blue(),
+                Palette::Green => theme.ansi_fg_green(),
+                Palette::Orange => theme.ansi_fg_yellow(),
+                Palette::Purple => theme.ansi_fg_magenta(),
+                Palette::Red => theme.ansi_fg_red(),
+            };
+            (content, background)
+        }
+        None => (
+            AvatarContent::DisplayName(fallback_name.to_string()),
+            theme.ansi_fg_blue(),
+        ),
+    };
+    Avatar::new(
+        content,
+        UiComponentStyles {
+            width: Some(AGENT_MONITOR_AVATAR_SIZE),
+            height: Some(AGENT_MONITOR_AVATAR_SIZE),
+            font_size: Some(10.),
+            font_family_id: Some(appearance.monospace_font_family()),
+            font_weight: Some(Weight::Bold),
+            font_color: Some(theme.surface_1().into()),
+            background: Some(background.into()),
+            border_radius: Some(CornerRadius::with_all(Radius::Pixels(
+                AGENT_MONITOR_AVATAR_SIZE / 2.,
+            ))),
+            ..Default::default()
+        },
+    )
+    .build()
+    .finish()
+}
+
+fn render_agent_monitor(
+    state: &VerticalTabsPanelState,
+    workspace: &Workspace,
+    projection: &AgentTabsProjection,
+    app: &AppContext,
+) -> Box<dyn Element> {
+    let appearance = Appearance::as_ref(app);
+    let theme = appearance.theme();
+    let profiles = AgentProfileStore::load_default();
+    let (visible_nodes, selected_node_id) = {
+        let mut monitor_state = state.agent_monitor.borrow_mut();
+        monitor_state.reconcile(
+            projection,
+            active_agent_monitor_node_id(workspace, projection, app),
+        );
+        (
+            visible_agent_monitor_nodes(projection, &monitor_state.expanded_node_ids),
+            monitor_state.selected_node_id.clone(),
+        )
+    };
+    {
+        let mut monitor_state = state.agent_monitor.borrow_mut();
+        let keyboard_node_id =
+            agent_monitor_keyboard_node_id(selected_node_id.clone(), projection);
+        monitor_state.keyboard_target = keyboard_node_id.and_then(|selected_node_id| {
+            projection
+                .nodes
+                .iter()
+                .find(|node| node.id == selected_node_id)
+                .map(|node| AgentMonitorKeyboardTarget {
+                    node_id: node.id.clone(),
+                    has_children: node.has_children,
+                    navigation_action: agent_monitor_navigation_action(&node.id, app),
+                    accessibility_label: agent_monitor_control_label(
+                        node, projection, false, false,
+                    ),
+                })
+        });
+    }
+
+    let mut rows = Flex::column()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+        .with_spacing(2.);
+    if let Some(focus) = state.agent_monitor_focus.as_ref() {
+        rows.add_child(ChildView::new(focus).finish());
+    }
+    for node in visible_nodes {
+        let (row_mouse_state, chevron_mouse_state, customize_mouse_state, is_expanded) = {
+            let mut monitor_state = state.agent_monitor.borrow_mut();
+            (
+                monitor_state.row_mouse_state(node.id.clone()),
+                monitor_state.chevron_mouse_state(node.id.clone()),
+                monitor_state.customize_mouse_state(node.id.clone()),
+                monitor_state.expanded_node_ids.contains(&node.id),
+            )
+        };
+        let node_id = node.id.clone();
+        let is_selected = selected_node_id.as_ref() == Some(&node_id);
+        let profile = agent_monitor_profile(&profiles, node);
+        let fallback_name = agent_monitor_fallback_name(node);
+        let display_name = agent_monitor_display_name(profile, node);
+        let summary = agent_monitor_summary(node, projection);
+        let status_color = agent_monitor_status_color(node.status, theme);
+        let indent = node.depth.saturating_sub(1) as f32 * AGENT_MONITOR_INDENT;
+        let customize_action = agent_monitor_customize_action(node);
+        let kind_icon = agent_monitor_kind_icon(node.kind);
+        let tree_guide = agent_monitor_tree_guide(node, projection, appearance, theme);
+
+        let chevron: Box<dyn Element> = if node.has_children {
+            let icon = if is_expanded {
+                CoreIcon::ChevronDown
+            } else {
+                CoreIcon::ChevronRight
+            };
+            let disclosure_label = agent_monitor_control_label(node, projection, is_expanded, true);
+            let expand_node_id = node_id.clone();
+            let chevron = Hoverable::new(chevron_mouse_state.clone(), move |mouse_state| {
+                let color = if mouse_state.is_hovered() {
+                    theme.active_ui_text_color()
+                } else {
+                    theme.nonactive_ui_text_color()
+                };
+                ConstrainedBox::new(icon.to_warpui_icon(color).finish())
+                    .with_width(AGENT_MONITOR_INDENT)
+                    .with_height(AGENT_MONITOR_INDENT)
+                    .finish()
+            })
+            .with_cursor(Cursor::PointingHand)
+            .on_click(move |ctx, _, _| {
+                ctx.dispatch_typed_action(WorkspaceAction::SetAgentMonitorExpanded {
+                    node_id: expand_node_id.clone(),
+                    expanded: !is_expanded,
+                    accessibility_label: disclosure_label.clone(),
+                });
+            })
+            .finish();
+            appearance.ui_builder().overlay_tool_tip_on_element(
+                agent_monitor_control_label(node, projection, is_expanded, true),
+                chevron_mouse_state,
+                chevron,
+                ParentAnchor::TopRight,
+                ChildAnchor::BottomRight,
+                vec2f(0., -4.),
+            )
+        } else {
+            ConstrainedBox::new(Empty::new().finish())
+                .with_width(AGENT_MONITOR_INDENT)
+                .with_height(AGENT_MONITOR_INDENT)
+                .finish()
+        };
+
+        let navigation_action = agent_monitor_navigation_action(&node_id, app);
+        let click_navigation_action = navigation_action.clone();
+        let show_avatar = node.depth == 0;
+        let body = Hoverable::new(row_mouse_state.clone(), move |mouse_state| {
+            let background = if is_selected {
+                internal_colors::fg_overlay_3(theme)
+            } else if mouse_state.is_hovered() {
+                WarpThemeFill::Solid(internal_colors::neutral_1(theme))
+            } else {
+                WarpThemeFill::Solid(internal_colors::neutral_1(theme))
+            };
+            let text_color = if is_selected || mouse_state.is_hovered() {
+                theme.active_ui_text_color()
+            } else {
+                theme.nonactive_ui_text_color()
+            };
+            let font_size = if node.depth == 0 { 12. } else { 11. };
+            let mut body = Flex::row()
+                .with_main_axis_size(MainAxisSize::Max)
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_spacing(6.);
+            if show_avatar {
+                body.add_child(render_agent_monitor_avatar(
+                    profile,
+                    &fallback_name,
+                    appearance,
+                ));
+            } else {
+                body.add_child(
+                    ConstrainedBox::new(
+                        kind_icon
+                            .to_warpui_icon(theme.nonactive_ui_text_color())
+                            .finish(),
+                    )
+                    .with_width(14.)
+                    .with_height(14.)
+                    .finish(),
+                );
+            }
+            body.add_child(
+                ConstrainedBox::new(
+                    agent_monitor_status_icon(node.status)
+                        .to_warpui_icon(status_color.into())
+                        .finish(),
+                )
+                .with_width(12.)
+                .with_height(12.)
+                .finish(),
+            );
+            body.add_child(
+                Shrinkable::new(
+                    1.,
+                    Text::new_inline(display_name.clone(), appearance.ui_font_family(), font_size)
+                        .with_clip(ClipConfig::ellipsis())
+                        .with_color(text_color.into())
+                        .finish(),
+                )
+                .finish(),
+            );
+            body.add_child(
+                Text::new_inline(summary.clone(), appearance.ui_font_family(), 10.)
+                    .with_color(theme.sub_text_color(theme.background()).into())
+                    .finish(),
+            );
+            if let Some(action) = customize_action.clone() {
+                let label_color = if mouse_state.is_hovered() {
+                    theme.active_ui_text_color()
+                } else {
+                    theme.nonactive_ui_text_color()
+                };
+                body.add_child(
+                    Hoverable::new(customize_mouse_state.clone(), move |_| {
+                        Container::new(
+                            Text::new_inline("Edit", appearance.ui_font_family(), 10.)
+                                .with_color(label_color.into())
+                                .finish(),
+                        )
+                        .with_horizontal_padding(2.)
+                        .finish()
+                    })
+                    .with_cursor(Cursor::PointingHand)
+                    .on_click(move |ctx, _, _| {
+                        ctx.dispatch_typed_action(action.clone());
+                    })
+                    .finish(),
+                );
+            }
+            let mut container = Container::new(body.finish())
+                .with_uniform_padding(4.)
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(ROW_CORNER_RADIUS)));
+            if is_selected || mouse_state.is_hovered() {
+                container = container.with_background(background);
+            }
+            container.finish()
+        })
+        .with_cursor(Cursor::PointingHand)
+        .with_defer_events_to_children()
+        .on_click(move |ctx, _, _| {
+            if let Some(action) = click_navigation_action.clone() {
+                ctx.dispatch_typed_action(action);
+            }
+            ctx.notify();
+        })
+        .finish();
+
+        let body = appearance.ui_builder().overlay_tool_tip_on_element(
+            agent_monitor_control_label(node, projection, is_expanded, false),
+            row_mouse_state,
+            body,
+            ParentAnchor::TopLeft,
+            ChildAnchor::BottomLeft,
+            vec2f(0., -4.),
+        );
+
+        let mut row = Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center);
+        if indent > 0. {
+            row.add_child(
+                ConstrainedBox::new(Empty::new().finish())
+                    .with_width(indent)
+                    .finish(),
+            );
+        }
+        if node.depth > 0 {
+            row.add_child(
+                ConstrainedBox::new(tree_guide)
+                    .with_width(AGENT_MONITOR_TREE_GUIDE_WIDTH)
+                    .finish(),
+            );
+        }
+        row.add_child(chevron);
+        row.add_child(Shrinkable::new(1., body).finish());
+        rows.add_child(
+            Container::new(row.finish())
+                .with_horizontal_padding(GROUP_HORIZONTAL_PADDING)
+                .finish(),
+        );
+    }
+
+    Container::new(rows.finish())
+        .with_padding(Padding::uniform(8.).with_bottom(0.))
+        .finish()
 }
 
 #[allow(clippy::too_many_arguments)]

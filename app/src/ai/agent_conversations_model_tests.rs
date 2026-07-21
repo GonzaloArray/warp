@@ -45,6 +45,9 @@ use crate::test_util::ai_agent_tasks::{create_api_task, create_message};
 use crate::test_util::settings::initialize_history_persistence_for_tests;
 use crate::workspace::WorkspaceAction;
 
+#[path = "agent_conversations_model/hierarchy_tests.rs"]
+mod hierarchy_tests;
+
 /// Creates a test task with specified creator UID and updated_at time
 fn create_test_task(
     task_id: &str,

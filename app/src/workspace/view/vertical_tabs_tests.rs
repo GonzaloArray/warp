@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{collections::HashSet, path::PathBuf};
 
 use pathfinder_geometry::rect::RectF;
 use pathfinder_geometry::vector::Vector2F;
@@ -6,10 +6,13 @@ use warpui::EntityId;
 use warpui::elements::PositionedElementOffsetBounds;
 
 use super::{
-    AgentTabTextPreference, SummaryPaneKind, SummaryPaneKindIcons, TerminalAgentText,
-    TerminalPrimaryLineData, TerminalPrimaryLineFont, VerticalTabsDetailTarget,
+    AGENT_MONITOR_EMPTY_STATE_MESSAGE, AGENT_MONITOR_EMPTY_STATE_TITLE, AgentMonitorKeyboardAction,
+    AgentMonitorPanelState, AgentTabTextPreference, SummaryPaneKind, SummaryPaneKindIcons,
+    TerminalAgentText, TerminalPrimaryLineData, TerminalPrimaryLineFont, VerticalTabsDetailTarget,
     VerticalTabsDetailTargetKind, VerticalTabsSummaryBranchEntry, VerticalTabsSummaryData,
-    VerticalTabsSummaryPrimaryLabel, branch_label_display, coalesce_summary_branch_entries,
+    VerticalTabsSummaryPrimaryLabel, agent_monitor_control_label, agent_monitor_customize_action,
+    agent_monitor_display_name, agent_monitor_keyboard_action, agent_monitor_keyboard_node_id,
+    agent_monitor_summary, branch_label_display, coalesce_summary_branch_entries,
     code_detail_kind_label, compact_branch_subtitle_display, detail_sidecar_width_and_bounds,
     detail_target_for_hovered_row, non_terminal_search_text_fragments,
     pane_ids_for_display_granularity, pane_search_text_fragments, preferred_agent_tab_titles,
@@ -18,15 +21,24 @@ use super::{
     should_show_tab_group_header, sort_summary_primary_labels_status_first, summary_overflow_count,
     summary_search_text_fragments, terminal_kind_badge_label, terminal_primary_line_data,
     terminal_pull_request_badge_label, terminal_search_text_fragments,
-    terminal_title_fallback_font, uses_outer_group_container, visible_pane_ids_for_detail_target,
-    vtab_diff_stats_text,
+    terminal_title_fallback_font, uses_outer_group_container, visible_agent_monitor_nodes,
+    visible_pane_ids_for_detail_target, vtab_diff_stats_text,
 };
 use crate::ai::agent::conversation::ConversationStatus;
+use crate::ai::agent_conversations_model::{
+    AgentConversationEntryId, AgentHierarchyAvailability, AgentHierarchyCounts,
+};
+use crate::ai::agent_management::profiles::AgentProfile;
+use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::context_chips::display_chip::GitLineChanges;
 use crate::pane_group::pane::IPaneType;
 use crate::pane_group::{PaneId, TerminalPaneId};
 use crate::safe_triangle::SafeTriangle;
 use crate::terminal::CLIAgent;
+use crate::workspace::WorkspaceAction;
+use crate::workspace::agent_tabs_projection::{
+    AgentTabKind, AgentTabNode, AgentTabStatus, AgentTabsProjection, MonitorNodeId,
+};
 use crate::workspace::tab_settings::VerticalTabsDisplayGranularity;
 
 fn label(text: &str) -> VerticalTabsSummaryPrimaryLabel {
@@ -38,6 +50,246 @@ fn label(text: &str) -> VerticalTabsSummaryPrimaryLabel {
 
 fn pane_id() -> PaneId {
     TerminalPaneId::dummy_terminal_pane_id().into()
+}
+
+fn monitor_id(index: usize) -> AgentConversationEntryId {
+    AgentConversationEntryId::AmbientRun(
+        format!("550e8400-e29b-41d4-a716-{index:012}")
+            .parse::<AmbientAgentTaskId>()
+            .unwrap(),
+    )
+}
+
+fn monitor_node(
+    id: AgentConversationEntryId,
+    parent_id: Option<AgentConversationEntryId>,
+    depth: usize,
+    has_children: bool,
+) -> AgentTabNode {
+    AgentTabNode {
+        id: MonitorNodeId::Oz(id),
+        parent_id: parent_id.map(MonitorNodeId::Oz),
+        depth,
+        kind: if depth == 0 {
+            AgentTabKind::AgentRoot
+        } else {
+            AgentTabKind::Task
+        },
+        availability: AgentHierarchyAvailability::Available,
+        status: AgentTabStatus::Working,
+        has_children,
+        descendants: AgentHierarchyCounts::default(),
+        external_provider: None,
+        display_label: if depth == 0 {
+            "Gateway monitor".to_string()
+        } else {
+            "Architecture".to_string()
+        },
+        profile_key: Some(id.as_key()),
+    }
+}
+
+#[test]
+fn agent_monitor_rows_keep_canonical_expansion_across_refreshes() {
+    let root = monitor_id(1);
+    let task = monitor_id(2);
+    let projection = AgentTabsProjection {
+        nodes: vec![
+            monitor_node(root, None, 0, true),
+            monitor_node(task, Some(root), 1, false),
+        ],
+    };
+    let mut state = AgentMonitorPanelState::default();
+
+    assert_eq!(
+        visible_agent_monitor_nodes(&projection, &state.expanded_node_ids).len(),
+        1
+    );
+    state.set_expanded(&MonitorNodeId::Oz(root), true);
+    state.reconcile(&projection, None);
+
+    assert_eq!(
+        visible_agent_monitor_nodes(&projection, &state.expanded_node_ids)
+            .into_iter()
+            .map(|node| node.id.clone())
+            .collect::<Vec<_>>(),
+        vec![MonitorNodeId::Oz(root), MonitorNodeId::Oz(task)]
+    );
+}
+
+#[test]
+fn agent_monitor_expanding_does_not_select_or_activate_the_row() {
+    let root = MonitorNodeId::Oz(monitor_id(1));
+    let mut state = AgentMonitorPanelState::default();
+
+    state.set_expanded(&root, true);
+
+    assert!(state.expanded_node_ids.contains(&root));
+    assert_eq!(state.selected_node_id, None);
+
+    state.set_expanded(&root, false);
+
+    assert!(!state.expanded_node_ids.contains(&root));
+    assert_eq!(state.selected_node_id, None);
+}
+
+#[test]
+fn agent_monitor_selection_tracks_the_active_node_and_prunes_stale_ids() {
+    let root = MonitorNodeId::Oz(monitor_id(1));
+    let projection = AgentTabsProjection {
+        nodes: vec![monitor_node(monitor_id(1), None, 0, false)],
+    };
+    let mut state = AgentMonitorPanelState {
+        selected_node_id: Some(MonitorNodeId::Oz(monitor_id(99))),
+        ..Default::default()
+    };
+
+    state.reconcile(&projection, Some(root.clone()));
+    assert_eq!(state.selected_node_id, Some(root));
+
+    state.reconcile(&projection, None);
+    assert_eq!(state.selected_node_id, None);
+}
+
+#[test]
+fn agent_monitor_keyboard_contract_keeps_activation_and_disclosure_separate() {
+    assert_eq!(
+        agent_monitor_keyboard_action("enter"),
+        Some(AgentMonitorKeyboardAction::Activate)
+    );
+    assert_eq!(
+        agent_monitor_keyboard_action("space"),
+        Some(AgentMonitorKeyboardAction::Activate)
+    );
+    assert_eq!(
+        agent_monitor_keyboard_action("right"),
+        Some(AgentMonitorKeyboardAction::Expand)
+    );
+    assert_eq!(
+        agent_monitor_keyboard_action("left"),
+        Some(AgentMonitorKeyboardAction::Collapse)
+    );
+    assert_eq!(agent_monitor_keyboard_action("escape"), None);
+}
+
+#[test]
+fn agent_monitor_collapsed_root_summary_keeps_status_and_task_count() {
+    let root = monitor_id(1);
+    let projection = AgentTabsProjection {
+        nodes: vec![
+            monitor_node(root, None, 0, true),
+            monitor_node(monitor_id(2), Some(root), 1, false),
+            monitor_node(monitor_id(3), Some(root), 1, false),
+        ],
+    };
+
+    assert_eq!(
+        agent_monitor_summary(&projection.nodes[0], &projection),
+        "working · 2 subagents · 2 active"
+    );
+}
+
+#[test]
+fn agent_monitor_control_labels_describe_select_and_disclosure_separately() {
+    let root = monitor_id(1);
+    let projection = AgentTabsProjection {
+        nodes: vec![
+            monitor_node(root, None, 0, true),
+            monitor_node(monitor_id(2), Some(root), 1, false),
+        ],
+    };
+    let node = &projection.nodes[0];
+
+    assert_eq!(
+        agent_monitor_control_label(node, &projection, false, false),
+        "Agent tab: Select Gateway monitor, working · 1 subagent · 1 active. Press Enter or Space to open; Right Arrow expands and Left Arrow collapses"
+    );
+    assert_eq!(
+        agent_monitor_control_label(node, &projection, false, true),
+        "Disclosure button: Expand Gateway monitor"
+    );
+    assert_eq!(
+        agent_monitor_control_label(node, &projection, true, true),
+        "Disclosure button: Collapse Gateway monitor"
+    );
+}
+
+#[test]
+fn agent_monitor_keyboard_has_a_root_target_before_a_terminal_is_active() {
+    let root = monitor_id(1);
+    let projection = AgentTabsProjection {
+        nodes: vec![
+            monitor_node(root, None, 0, true),
+            monitor_node(monitor_id(2), Some(root), 1, false),
+        ],
+    };
+
+    assert_eq!(
+        agent_monitor_keyboard_node_id(None, &projection),
+        Some(MonitorNodeId::Oz(root))
+    );
+}
+
+#[test]
+fn agent_monitor_empty_projection_is_safe() {
+    assert!(
+        visible_agent_monitor_nodes(&AgentTabsProjection::default(), &HashSet::new()).is_empty()
+    );
+}
+
+#[test]
+fn agent_monitor_empty_state_identifies_the_agents_section_without_sample_data() {
+    let projection = AgentTabsProjection::default();
+
+    assert!(projection.nodes.is_empty());
+    assert_eq!(AGENT_MONITOR_EMPTY_STATE_TITLE, "Agents");
+    assert_eq!(
+        AGENT_MONITOR_EMPTY_STATE_MESSAGE,
+        "Enable a provider below, then Launch — or start a CLI in any terminal."
+    );
+}
+
+#[test]
+fn agent_monitor_profile_name_overrides_native_projection_label() {
+    let id = monitor_id(1);
+    let node = monitor_node(id, None, 0, false);
+    let profile = AgentProfile::new("oz", id.as_key(), "Gonzalo").unwrap();
+
+    assert_eq!(agent_monitor_display_name(Some(&profile), &node), "Gonzalo");
+    assert_eq!(agent_monitor_display_name(None, &node), "Gateway monitor");
+}
+
+#[test]
+fn agent_monitor_customize_action_uses_the_trusted_profile_identity_not_the_title() {
+    let id = monitor_id(7);
+    let mut node = monitor_node(id, None, 0, false);
+    node.display_label = "A title must not become an identity".to_string();
+
+    assert!(matches!(
+        agent_monitor_customize_action(&node),
+        Some(WorkspaceAction::OpenAgentMonitorProfileEditor {
+            provider,
+            agent_key,
+            fallback_name,
+        }) if provider == "oz" && agent_key == id.as_key()
+            && fallback_name == "A title must not become an identity"
+    ));
+}
+
+#[test]
+fn agent_monitor_customize_action_requires_a_profile_key() {
+    let id = monitor_id(8);
+    let mut node = monitor_node(id, None, 0, false);
+    node.profile_key = None;
+
+    assert!(agent_monitor_customize_action(&node).is_none());
+}
+
+#[test]
+fn agent_monitor_customize_action_is_available_without_a_feature_flag_override() {
+    let node = monitor_node(monitor_id(9), None, 0, false);
+
+    assert!(agent_monitor_customize_action(&node).is_some());
 }
 fn code_summary_kind(title: &str) -> SummaryPaneKind {
     SummaryPaneKind::Code {

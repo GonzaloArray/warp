@@ -1,5 +1,6 @@
 #[allow(dead_code)]
 pub mod entry;
+mod hierarchy;
 mod query;
 
 use std::collections::{HashMap, HashSet};
@@ -13,6 +14,10 @@ pub use entry::{
 };
 use futures::stream::AbortHandle;
 use fuzzy_match::FuzzyMatchResult;
+#[allow(unused_imports)]
+pub use hierarchy::{
+    AgentHierarchyAttention, AgentHierarchyAvailability, AgentHierarchyCounts, AgentHierarchyNode,
+};
 use instant::Instant;
 use itertools::Itertools;
 pub use query::query_conversation_entries;
@@ -1275,6 +1280,15 @@ impl AgentConversationsModel {
             .filter(|entry| entry.matches_filters(filters, app))
             .sorted_by(|a, b| b.display.last_updated.cmp(&a.display.last_updated))
             .collect()
+    }
+
+    /// Returns an immutable hierarchy without changing the existing flat entry contract.
+    pub fn get_hierarchy(
+        &self,
+        filters: &AgentManagementFilters,
+        app: &AppContext,
+    ) -> Vec<AgentHierarchyNode> {
+        hierarchy::get_hierarchy(self, filters, app)
     }
 
     /// Returns normalized entries before user-selected filters are applied.

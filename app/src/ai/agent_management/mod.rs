@@ -2,6 +2,8 @@ mod agent_management_model;
 pub(crate) mod agent_type_selector;
 pub(crate) mod details_action_buttons;
 pub(crate) mod notifications;
+pub(crate) mod profile_editor;
+pub(crate) mod profiles;
 
 pub(crate) mod cloud_setup_guide_view;
 pub(crate) mod telemetry;

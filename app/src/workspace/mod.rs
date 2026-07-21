@@ -1,5 +1,7 @@
 mod action;
 mod active_session;
+pub(crate) mod agent_provider_hub;
+pub mod agent_tabs_projection;
 pub(crate) mod auto_handoff;
 pub mod bonus_grant_notification_model;
 #[cfg(target_os = "macos")]

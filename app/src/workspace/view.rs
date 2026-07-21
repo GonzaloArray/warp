@@ -169,7 +169,8 @@ use crate::ai::agent::{AIAgentInput, EntrypointType};
 #[cfg(target_family = "wasm")]
 use crate::ai::agent_conversations_model::AgentConversationsModelEvent;
 use crate::ai::agent_conversations_model::{
-    AgentConversationNavigationSubject, AgentConversationsModel,
+    AgentConversationNavigationSubject, AgentConversationsModel, AgentManagementFilters,
+    OwnerFilter,
 };
 use crate::ai::agent_management::AgentManagementEvent;
 use crate::ai::agent_management::notifications::NotificationFilter;
@@ -177,6 +178,10 @@ use crate::ai::agent_management::notifications::toast_stack::AgentNotificationTo
 use crate::ai::agent_management::notifications::view::{
     NotificationMailboxView, NotificationMailboxViewEvent,
 };
+use crate::ai::agent_management::profile_editor::{
+    AgentProfileEditorEvent, AgentProfileEditorView,
+};
+use crate::ai::agent_management::profiles::{AgentProfile, AgentProfileStore};
 use crate::ai::agent_management::telemetry::AgentManagementTelemetryEvent;
 use crate::ai::agent_management::view::{AgentManagementView, AgentManagementViewEvent};
 #[cfg(not(target_family = "wasm"))]
@@ -485,6 +490,7 @@ use crate::workflows::{
     WorkflowViewMode,
 };
 use crate::workspace::action::CommandSearchOptions;
+use crate::workspace::agent_tabs_projection::AgentTabsProjection;
 use crate::workspace::bonus_grant_notification_model::BonusGrantNotificationEvent;
 #[cfg(target_os = "macos")]
 use crate::workspace::cli_install;
@@ -1153,6 +1159,9 @@ pub struct Workspace {
     left_panel_open: bool,
     vertical_tabs_panel_open: bool,
     vertical_tabs_panel: VerticalTabsPanelState,
+    agent_monitor_auto_revealed: bool,
+    agent_monitor_profile_editor: ViewHandle<AgentProfileEditorView>,
+    is_agent_monitor_profile_editor_open: bool,
     left_panel_view: ViewHandle<LeftPanelView>,
     left_panel_views: Vec<ToolPanelView>,
     right_panel_view: ViewHandle<RightPanelView>,
@@ -1198,6 +1207,10 @@ pub struct Workspace {
     /// orchestration cards' "New API key…" flow. Cloud mode renders the
     /// FTUX view inline and does not use this.
     create_auth_secret_modal: Option<ViewHandle<Modal<AuthSecretFtuxView>>>,
+}
+
+fn should_auto_reveal_agent_monitor(already_revealed: bool, node_count: usize) -> bool {
+    !already_revealed && node_count > 0
 }
 
 impl Workspace {
@@ -1394,6 +1407,66 @@ impl Workspace {
         });
         editor
     }
+
+    fn build_agent_monitor_profile_editor(
+        ctx: &mut ViewContext<Self>,
+    ) -> ViewHandle<AgentProfileEditorView> {
+        let profile = AgentProfile::new("oz", "placeholder", "Agent")
+            .expect("the built-in monitor editor identity is valid");
+        let editor =
+            ctx.add_typed_action_view(|ctx| AgentProfileEditorView::new(profile.clone(), ctx));
+        ctx.subscribe_to_view(&editor, |me, _, event, ctx| {
+            me.handle_agent_monitor_profile_editor_event(event, ctx);
+        });
+        editor
+    }
+
+    fn open_agent_monitor_profile_editor(
+        &mut self,
+        provider: &str,
+        agent_key: &str,
+        fallback_name: &str,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(default_profile) = AgentProfile::new(provider, agent_key, fallback_name) else {
+            return;
+        };
+        let store = AgentProfileStore::load_default();
+        let profile = store
+            .profiles
+            .get(&default_profile.key())
+            .cloned()
+            .unwrap_or(default_profile);
+        self.agent_monitor_profile_editor
+            .update(ctx, |editor, ctx| {
+                editor.set_profile(profile, ctx);
+            });
+        self.is_agent_monitor_profile_editor_open = true;
+        ctx.focus(&self.agent_monitor_profile_editor);
+        ctx.notify();
+    }
+
+    fn handle_agent_monitor_profile_editor_event(
+        &mut self,
+        event: &AgentProfileEditorEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        match event {
+            AgentProfileEditorEvent::Saved(profile) => {
+                let mut store = AgentProfileStore::load_default();
+                store.upsert(profile.clone());
+                if let Err(error) = store.save_default() {
+                    log::warn!("Unable to save agent profiles: {error}");
+                }
+                self.is_agent_monitor_profile_editor_open = false;
+            }
+            AgentProfileEditorEvent::Cancelled => {
+                self.is_agent_monitor_profile_editor_open = false;
+            }
+        }
+        ctx.notify();
+    }
+
     fn tab_rename_editor(ctx: &mut ViewContext<Self>) -> ViewHandle<EditorView> {
         let editor = {
             ctx.add_typed_action_view(|ctx| {
@@ -3144,6 +3217,12 @@ impl Workspace {
             &BlocklistAIHistoryModel::handle(ctx),
             Self::handle_history_model_event,
         );
+        // Keep the vertical-tabs monitor's read-only snapshot fresh without
+        // creating panes or querying once per rendered row.
+        ctx.subscribe_to_model(&AgentConversationsModel::handle(ctx), |me, _, _, ctx| {
+            me.auto_reveal_agent_monitor(ctx);
+            ctx.notify();
+        });
         ctx.subscribe_to_model(&CLIAgentSessionsModel::handle(ctx), |me, _, event, ctx| {
             me.handle_cli_agent_sessions_event(event, ctx);
         });
@@ -3266,6 +3345,7 @@ impl Workspace {
         let agent_toolbar_editor_modal = Self::build_agent_toolbar_editor_modal(ctx);
 
         let import_modal = Self::build_import_modal(ctx);
+        let agent_monitor_profile_editor = Self::build_agent_monitor_profile_editor(ctx);
 
         Self::observe_server_api(ctx);
 
@@ -3460,7 +3540,14 @@ impl Workspace {
             ai_fact_view,
             left_panel_open: false,
             vertical_tabs_panel_open: false,
-            vertical_tabs_panel: Default::default(),
+            vertical_tabs_panel: {
+                let mut panel = VerticalTabsPanelState::default();
+                panel.attach_agent_monitor_focus(ctx);
+                panel
+            },
+            agent_monitor_auto_revealed: false,
+            agent_monitor_profile_editor,
+            is_agent_monitor_profile_editor_open: false,
             left_panel_view,
             left_panel_views,
             right_panel_view,
@@ -3716,6 +3803,7 @@ impl Workspace {
                 | CLIAgentSessionsModelEvent::SessionUpdated { .. }
         ) && self.workspace_contains_terminal_view(event.terminal_view_id(), ctx)
         {
+            self.auto_reveal_agent_monitor(ctx);
             ctx.notify();
         }
     }
@@ -5033,7 +5121,12 @@ impl Workspace {
     fn focus_left_panel(&mut self, ctx: &mut ViewContext<Self>) {
         // Starts from terminal
         if self.active_tab_pane_group().is_self_or_child_focused(ctx) {
-            if self.current_workspace_state.is_warp_drive_open {
+            if self.vertical_tabs_panel_open
+                && !self.agent_tabs_projection(ctx).nodes.is_empty()
+                && self.vertical_tabs_panel.focus_agent_monitor(ctx)
+            {
+                // The monitor is the first-class vertical-tabs navigation target.
+            } else if self.current_workspace_state.is_warp_drive_open {
                 self.reset_focused_index_in_warp_drive(true, ctx);
             } else if self.is_theme_chooser_open() {
                 ctx.focus(&self.theme_chooser_view);
@@ -7901,6 +7994,72 @@ impl Workspace {
 
     pub fn active_terminal_id(&self, app: &AppContext) -> Option<EntityId> {
         self.read_from_active_terminal_view(app, |terminal| terminal.id())
+    }
+
+    /// Snapshot consumed by the vertical-tabs monitor. This is intentionally a
+    /// single model query per refresh: row rendering must not inspect agent
+    /// models, terminal output, or profile files on its own.
+    pub(crate) fn agent_tabs_projection(&self, app: &AppContext) -> AgentTabsProjection {
+        let filters = AgentManagementFilters {
+            owners: OwnerFilter::All,
+            ..Default::default()
+        };
+        let oz_nodes = AgentConversationsModel::as_ref(app).get_hierarchy(&filters, app);
+        let external_sessions = AgentTabsProjection::external_sessions_from_model(
+            CLIAgentSessionsModel::as_ref(app).sessions_snapshot(),
+        );
+        AgentTabsProjection::from_snapshots(oz_nodes, external_sessions)
+    }
+
+    /// Opens a terminal and launches the provider CLI. Warp remains the
+    /// observer: the CLI owns auth, models, and runtime.
+    fn launch_agent_provider(
+        &mut self,
+        provider: crate::workspace::agent_provider_hub::AgentProviderId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if !self.vertical_tabs_panel_open {
+            self.open_vertical_tabs_panel_if_enabled(ctx);
+        }
+        self.add_terminal_tab(true, ctx);
+        let command = provider.launch_command();
+        // Prefill + submit so the user lands in the provider immediately.
+        // If the CLI is missing, the shell surfaces the install error.
+        self.insert_in_input(command, true, true, false, ctx);
+        ctx.notify();
+    }
+
+    fn set_agent_provider_enabled(
+        &mut self,
+        provider: crate::workspace::agent_provider_hub::AgentProviderId,
+        enabled: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let mut prefs =
+            crate::workspace::agent_provider_hub::AgentProviderHubPrefs::load_default();
+        prefs.set_enabled(provider, enabled);
+        if let Err(error) = prefs.save_default() {
+            log::warn!("Failed to save agent provider hub prefs: {error}");
+        }
+        ctx.notify();
+    }
+
+    /// The monitor only needs the vertical rail when there is something to
+    /// monitor. Reveal it once for the workspace, then leave the user's later
+    /// open/close choice untouched.
+    fn auto_reveal_agent_monitor(&mut self, ctx: &mut ViewContext<Self>) {
+        if !should_auto_reveal_agent_monitor(
+            self.agent_monitor_auto_revealed,
+            self.agent_tabs_projection(ctx).nodes.len(),
+        ) {
+            return;
+        }
+        self.agent_monitor_auto_revealed = true;
+        TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+            let _ = settings.use_vertical_tabs.set_value(true, ctx);
+        });
+        self.vertical_tabs_panel_open = true;
+        self.sync_window_button_visibility(ctx);
     }
 
     /// Retrieves the entity id of the active current active input. This is needed
@@ -23768,6 +23927,24 @@ impl TypedActionView for Workspace {
                     WarpA11yRole::UserAction,
                 ))
             }
+            WorkspaceAction::FocusAgentMonitor => {
+                ActionAccessibilityContent::Custom(AccessibilityContent::new(
+                    "Agent monitor focused",
+                    "Use Enter or Space to select the active agent. Use Right Arrow to expand and Left Arrow to collapse.",
+                    WarpA11yRole::ButtonRole,
+                ))
+            }
+            WorkspaceAction::SetAgentMonitorExpanded {
+                expanded,
+                accessibility_label,
+                ..
+            } => ActionAccessibilityContent::Custom(AccessibilityContent::new_without_help(
+                format!(
+                    "{} {accessibility_label}",
+                    if *expanded { "Expanded" } else { "Collapsed" }
+                ),
+                WarpA11yRole::ButtonRole,
+            )),
             _ => ActionAccessibilityContent::from_debug(),
         }
     }
@@ -24664,6 +24841,19 @@ impl TypedActionView for Workspace {
                     ctx.notify();
                 }
             }
+            OpenAgentMonitorProfileEditor {
+                provider,
+                agent_key,
+                fallback_name,
+            } => {
+                self.open_agent_monitor_profile_editor(provider, agent_key, fallback_name, ctx);
+            }
+            LaunchAgentProvider { provider } => {
+                self.launch_agent_provider(*provider, ctx);
+            }
+            SetAgentProviderEnabled { provider, enabled } => {
+                self.set_agent_provider_enabled(*provider, *enabled, ctx);
+            }
             SetVerticalTabsDisplayGranularity(granularity) => {
                 let granularity = *granularity;
                 TabSettings::handle(ctx).update(ctx, |settings, ctx| {
@@ -25169,6 +25359,17 @@ impl TypedActionView for Workspace {
             }
             FocusLeftPanel => self.focus_left_panel(ctx),
             FocusRightPanel => self.focus_right_panel(ctx),
+            FocusAgentMonitor => {
+                self.vertical_tabs_panel.focus_agent_monitor(ctx);
+                ctx.notify();
+            }
+            SetAgentMonitorExpanded {
+                node_id, expanded, ..
+            } => {
+                self.vertical_tabs_panel
+                    .set_agent_monitor_expanded(node_id.clone(), *expanded);
+                ctx.notify();
+            }
             ViewObjectInWarpDrive(item_id) => {
                 // Focus newly created object in WD
                 self.view_in_and_focus_warp_drive(*item_id, ctx);
@@ -27381,6 +27582,24 @@ impl View for Workspace {
         {
             stack.add_positioned_overlay_child(
                 ChildView::new(&self.delete_conversation_confirmation_dialog).finish(),
+                OffsetPositioning::offset_from_parent(
+                    Vector2F::zero(),
+                    ParentOffsetBounds::WindowByPosition,
+                    ParentAnchor::Center,
+                    ChildAnchor::Center,
+                ),
+            );
+        }
+
+        if self.is_agent_monitor_profile_editor_open {
+            let editor =
+                Container::new(ChildView::new(&self.agent_monitor_profile_editor).finish())
+                    .with_background(appearance.theme().surface_1())
+                    .with_uniform_padding(16.)
+                    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.)))
+                    .finish();
+            stack.add_positioned_overlay_child(
+                editor,
                 OffsetPositioning::offset_from_parent(
                     Vector2F::zero(),
                     ParentOffsetBounds::WindowByPosition,

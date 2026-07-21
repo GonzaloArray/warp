@@ -310,6 +310,13 @@ fn transferred_tab_workspace(
 }
 
 #[test]
+fn agent_monitor_auto_reveal_waits_for_the_first_projected_agent() {
+    assert!(!should_auto_reveal_agent_monitor(false, 0));
+    assert!(should_auto_reveal_agent_monitor(false, 1));
+    assert!(!should_auto_reveal_agent_monitor(true, 1));
+}
+
+#[test]
 fn test_tab_bar_traffic_light_space_regression_for_resource_center_overlap() {
     // Regression for #10139: the Resource Center/right panel can be open on
     // Windows/Linux, but vertical-tabs and right-panel state should not decide
