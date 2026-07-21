@@ -2468,6 +2468,8 @@ impl Workspace {
             }
         });
         self.vertical_tabs_panel_open = true;
+        // Keep the Providers hub in view; restored scroll offsets used to hide it.
+        self.vertical_tabs_panel.scroll_agent_monitor_to_top();
         self.sync_window_button_visibility(ctx);
     }
 

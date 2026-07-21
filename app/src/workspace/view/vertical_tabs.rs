@@ -1387,6 +1387,10 @@ impl VerticalTabsPanelState {
         });
     }
 
+    pub(super) fn scroll_agent_monitor_to_top(&self) {
+        self.scroll_state.scroll_to(warpui::units::Pixels::zero());
+    }
+
     /// Returns the indices (in original order) of tab groups that have at least
     /// one pane matching the current search query. Returns all indices when the
     /// query is empty.
@@ -1891,9 +1895,12 @@ fn render_vertical_tabs_panel(
     .with_overlayed_scrollbar()
     .finish();
 
+    // Providers hub stays fixed above the scroll list so Launch is always
+    // visible (scroll position must not hide the connection surface).
     let panel_content = Flex::column()
         .with_main_axis_size(MainAxisSize::Max)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+        .with_child(render_agent_provider_hub(state, app))
         .with_child(render_control_bar(
             state,
             workspace,
@@ -2348,18 +2355,13 @@ fn render_agent_monitor_section(
     projection: &AgentTabsProjection,
     app: &AppContext,
 ) -> Box<dyn Element> {
-    let appearance = Appearance::as_ref(app);
-    let mut section = Flex::column()
-        .with_main_axis_size(MainAxisSize::Min)
-        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-        .with_spacing(4.)
-        .with_child(render_agent_provider_hub(state, app));
+    // Providers hub is fixed above the control bar (see render_vertical_tabs_panel).
+    // This section only renders live agent rows / empty state inside the scroll list.
     if projection.nodes.is_empty() {
-        section.add_child(render_agent_monitor_empty_state(appearance));
+        render_agent_monitor_empty_state(Appearance::as_ref(app))
     } else {
-        section.add_child(render_agent_monitor(state, workspace, projection, app));
+        render_agent_monitor(state, workspace, projection, app)
     }
-    section.finish()
 }
 
 fn active_sessions_by_provider(app: &AppContext) -> HashMap<AgentProviderId, usize> {
