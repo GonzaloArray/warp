@@ -2454,6 +2454,23 @@ impl Workspace {
         }
     }
 
+    /// Forces the agent-monitor rail (Providers + Agents) onto screen.
+    ///
+    /// The monitor is primary navigation on this branch: users must not need a
+    /// hidden settings toggle before they can see Launch / agent trees.
+    fn ensure_agent_monitor_rail_visible(&mut self, ctx: &mut ViewContext<Self>) {
+        if !FeatureFlag::VerticalTabs.is_enabled() {
+            return;
+        }
+        TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+            if !*settings.use_vertical_tabs.value() {
+                let _ = settings.use_vertical_tabs.set_value(true, ctx);
+            }
+        });
+        self.vertical_tabs_panel_open = true;
+        self.sync_window_button_visibility(ctx);
+    }
+
     fn show_hoa_onboarding_flow(&mut self, ctx: &mut ViewContext<Self>) {
         // Mark as completed immediately so the flow is never shown again,
         // even if the user quits mid-flow.
@@ -3982,6 +3999,10 @@ impl Workspace {
     ) {
         self.vertical_tabs_panel_open =
             Self::initial_vertical_tabs_panel_open(&workspace_setting, ctx);
+        // Agent monitor + Providers hub live in the left rail. Without this
+        // the feature is invisible (use_vertical_tabs defaults to false and
+        // restored windows often leave the panel closed).
+        self.ensure_agent_monitor_rail_visible(ctx);
         match workspace_setting {
             NewWorkspaceSource::Empty {
                 previous_active_window,
