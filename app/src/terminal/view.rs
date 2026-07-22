@@ -2812,6 +2812,8 @@ pub struct TerminalView {
     cli_subagent_controller: ModelHandle<CLISubagentController>,
     /// In-session Codex two-column subagent shell (not the global sidebar).
     codex_shell: std::cell::RefCell<crate::workspace::codex_session_shell::CodexSessionShellState>,
+    /// Free-text search for the shell history list.
+    codex_history_search: ViewHandle<crate::editor::EditorView>,
     use_agent_footer: ViewHandle<UseAgentToolbar>,
 
     agent_view_controller: ModelHandle<AgentViewController>,
@@ -4377,6 +4379,38 @@ impl TerminalView {
             codex_shell: std::cell::RefCell::new(
                 crate::workspace::codex_session_shell::CodexSessionShellState::new(),
             ),
+            codex_history_search: {
+                use crate::editor::{
+                    EditorView, Event as EditorEvent, SingleLineEditorOptions, TextOptions,
+                };
+                let editor = ctx.add_typed_action_view(|ctx| {
+                    let appearance = Appearance::as_ref(ctx);
+                    let options = SingleLineEditorOptions {
+                        text: TextOptions::ui_text(Some(11.), appearance),
+                        ..Default::default()
+                    };
+                    EditorView::single_line(options, ctx)
+                });
+                editor.update(ctx, |editor, ctx| {
+                    editor.set_placeholder_text("Buscar en historial…", ctx);
+                });
+                ctx.subscribe_to_view(&editor, |me, editor_view, event, ctx| match event {
+                    EditorEvent::Edited(_) => {
+                        let q = editor_view.as_ref(ctx).buffer_text(ctx);
+                        me.codex_shell.borrow_mut().set_history_query(q);
+                        ctx.notify();
+                    }
+                    EditorEvent::Escape => {
+                        me.codex_shell.borrow_mut().set_history_query(String::new());
+                        editor_view.update(ctx, |ed, ctx| {
+                            ed.set_buffer_text("", ctx);
+                        });
+                        ctx.notify();
+                    }
+                    _ => {}
+                });
+                editor
+            },
             use_agent_footer: use_agent_button_bar,
             agent_view_controller,
             agent_view_back_button,

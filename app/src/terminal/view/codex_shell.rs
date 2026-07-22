@@ -196,7 +196,16 @@ impl TerminalView {
                 shell.history_multi_select = true;
             }
             CodexShellAction::SetHistoryQuery { query } => {
+                let clear_editor = query.is_empty();
                 shell.set_history_query(query);
+                drop(shell);
+                if clear_editor {
+                    self.codex_history_search.update(ctx, |ed, ctx| {
+                        ed.set_buffer_text("", ctx);
+                    });
+                }
+                ctx.notify();
+                return;
             }
             CodexShellAction::ToggleHistoryTodayFilter => shell.toggle_history_today_only(),
             CodexShellAction::RetryPendingArchives => {
@@ -296,6 +305,7 @@ impl TerminalView {
         let terminal_view_id = self.view_id;
         let detail_scroll = shell.detail_scroll.clone();
 
+        let history_search = self.codex_history_search.clone();
         let nav = render_codex_nav_column(
             &mut shell,
             &active,
@@ -305,6 +315,7 @@ impl TerminalView {
             &history_entries,
             terminal_view_id,
             profile,
+            &history_search,
             app,
         );
         drop(shell);
@@ -498,11 +509,14 @@ fn render_codex_nav_column(
     history: &[HistorySubagentEntry],
     terminal_view_id: EntityId,
     profile: AgentUiProfile,
+    history_search: &warpui::ViewHandle<crate::editor::EditorView>,
     app: &AppContext,
 ) -> Box<dyn Element> {
     use crate::workspace::codex_session_shell::{
         HistorySort, filter_history_with, history_card_meta, history_card_subtitle,
     };
+    use warpui::ui_components::components::{UiComponent, UiComponentStyles};
+    use warpui::ui_components::text_input::TextInput;
 
     let appearance = Appearance::as_ref(app);
     let theme = appearance.theme();
@@ -706,6 +720,42 @@ fn render_codex_nav_column(
         let multi = shell.history_multi_select;
 
         if !history.is_empty() {
+            // Free-text search (real TextInput, not action stubs).
+            let search_field = TextInput::new(
+                history_search.clone(),
+                UiComponentStyles::default()
+                    .set_background(ElementFill::None)
+                    .set_border_radius(CornerRadius::with_all(Radius::Pixels(0.)))
+                    .set_border_width(0.),
+            )
+            .build()
+            .finish();
+            let search_bar = Container::new(
+                Flex::row()
+                    .with_main_axis_size(MainAxisSize::Max)
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .with_spacing(6.)
+                    .with_child(
+                        Text::new_inline("⌕".to_string(), font, 11.)
+                            .with_color(sub.into())
+                            .finish(),
+                    )
+                    .with_child(Shrinkable::new(1., search_field).finish())
+                    .finish(),
+            )
+            .with_padding(
+                Padding::uniform(0.)
+                    .with_top(6.)
+                    .with_bottom(6.)
+                    .with_left(8.)
+                    .with_right(8.),
+            )
+            .with_background(internal_colors::fg_overlay_1(theme))
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(CARD_RADIUS)))
+            .with_border(Border::all(1.).with_border_fill(theme.outline()))
+            .finish();
+            body = body.with_child(search_bar);
+
             let sort_short = match shell.history_filter.sort {
                 HistorySort::FinishedNewest => "Recientes",
                 HistorySort::FinishedOldest => "Antiguos",
@@ -751,7 +801,7 @@ fn render_codex_nav_column(
             if !shell.history_query.is_empty() {
                 pills = pills.with_child(filter_pill(
                     shell.row_mouse_state("__hist_query__"),
-                    "Limpiar filtro",
+                    "Limpiar",
                     true,
                     appearance,
                     theme,
@@ -762,14 +812,6 @@ fn render_codex_nav_column(
                 ));
             }
             body = body.with_child(pills.finish());
-
-            if !shell.history_query.is_empty() {
-                body = body.with_child(quiet_hint(
-                    &format!("Filtrando «{}»", shell.history_query),
-                    font,
-                    sub,
-                ));
-            }
 
             let mut tools = Flex::row()
                 .with_main_axis_size(MainAxisSize::Max)

@@ -3850,11 +3850,13 @@ impl Workspace {
 
     /// Map structured CLI session transitions into AgentOpsStore (Batch 4).
     /// Heuristic authority: CLI status is process-observed, not native JSONL.
+    /// Also surfaces agent toasts when the pane is not focused (blocked / done / failed).
     fn apply_cli_session_to_agent_ops(
         &mut self,
         event: &CLIAgentSessionsModelEvent,
-        ctx: &AppContext,
+        ctx: &mut ViewContext<Self>,
     ) {
+        use crate::ai::agent::conversation::ConversationStatus;
         use crate::terminal::cli_agent_sessions::CLIAgentSessionStatus;
         use crate::workspace::agent_ops::{
             AgentOpsEvent, EscalationPolicy, EventEnvelope, EventSource, SuppressContext,
@@ -4029,6 +4031,55 @@ impl Workspace {
             let _ = self
                 .agent_ops_store
                 .save(&crate::workspace::agent_ops::AgentOpsStore::default_path());
+
+            // Toast when this agent needs attention and is not the focused pane.
+            let focused_terminal = self.active_terminal_id(ctx);
+            let pane_unfocused = focused_terminal != Some(terminal_view_id);
+            if pane_unfocused {
+                if let CLIAgentSessionsModelEvent::StatusChanged { status, .. } = event {
+                    let toast_label = match status {
+                        CLIAgentSessionStatus::Blocked { message } => Some(format!(
+                            "{display} · necesita tu atención{}",
+                            message
+                                .as_ref()
+                                .map(|m| format!(": {}", truncate_for_toast(m)))
+                                .unwrap_or_default()
+                        )),
+                        CLIAgentSessionStatus::Success => {
+                            Some(format!("{display} · terminado · sin revisar"))
+                        }
+                        CLIAgentSessionStatus::Failed { message, .. } => Some(format!(
+                            "{display} · error{}",
+                            message
+                                .as_ref()
+                                .map(|m| format!(": {}", truncate_for_toast(m)))
+                                .unwrap_or_default()
+                        )),
+                        CLIAgentSessionStatus::InProgress => None,
+                    };
+                    if let Some(task_name) = toast_label {
+                        let icon = status
+                            .to_conversation_status()
+                            .render_icon(Appearance::as_ref(ctx));
+                        let tab_index = self
+                            .tab_index_for_terminal_view(terminal_view_id, ctx)
+                            .unwrap_or(self.active_tab_index);
+                        let window_id = self.window_id;
+                        self.agent_toast_stack.update(ctx, |stack, ctx| {
+                            stack.add_toast(
+                                AgentToast::new(
+                                    task_name,
+                                    icon,
+                                    window_id,
+                                    tab_index,
+                                    terminal_view_id,
+                                ),
+                                ctx,
+                            );
+                        });
+                    }
+                }
+            }
         } else {
             // Even when the primary event is rejected (ordering), still tick clocks.
             let _ = tick_alerts(
@@ -4039,6 +4090,37 @@ impl Workspace {
         }
     }
 
+    /// Find which tab hosts `terminal_view_id` (for toast navigation).
+    fn tab_index_for_terminal_view(
+        &self,
+        terminal_view_id: EntityId,
+        ctx: &AppContext,
+    ) -> Option<usize> {
+        for (tab_idx, tab) in self.tabs.iter().enumerate() {
+            if tab
+                .pane_group
+                .as_ref(ctx)
+                .find_pane_id_for_terminal_view(terminal_view_id, ctx)
+                .is_some()
+            {
+                return Some(tab_idx);
+            }
+        }
+        None
+    }
+}
+
+fn truncate_for_toast(s: &str) -> String {
+    let s = s.trim();
+    if s.chars().count() <= 72 {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(72).collect::<String>())
+    }
+}
+
+// Re-open Workspace impl for remaining methods (handle_session_settings_event lives below).
+impl Workspace {
     /// Handle session settings changes.
     fn handle_session_settings_event(
         &mut self,
