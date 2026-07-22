@@ -105,7 +105,7 @@ impl AiAccessSlide {
 
         let title = appearance
             .ui_builder()
-            .paragraph("Get AI access")
+            .paragraph("Acceso a la IA de Warp")
             .with_style(UiComponentStyles {
                 font_size: Some(36.),
                 font_weight: Some(Weight::Medium),
@@ -115,7 +115,7 @@ impl AiAccessSlide {
             .finish();
 
         let subtitle = FormattedTextElement::from_str(
-            "Save with a recurring plan, or explore Warp's AI before committing.",
+            "Ahorrá con un plan, o explorá la IA de Warp antes de decidir. Si usás solo agentes de terceros, podés configurar después.",
             appearance.ui_font_family(),
             16.,
         )
@@ -215,7 +215,7 @@ impl AiAccessSlide {
 
         let label = appearance
             .ui_builder()
-            .paragraph("Subscription")
+            .paragraph("Suscripción")
             .with_style(UiComponentStyles {
                 font_size: Some(16.),
                 font_weight: Some(Weight::Semibold),
@@ -229,7 +229,7 @@ impl AiAccessSlide {
             let green = theme.ansi_fg_green();
             let badge_text = appearance
                 .ui_builder()
-                .paragraph("Best value")
+                .paragraph("Mejor valor")
                 .with_style(UiComponentStyles {
                     font_size: Some(12.),
                     font_weight: Some(Weight::Normal),
@@ -255,8 +255,8 @@ impl AiAccessSlide {
             .finish();
 
         let description = FormattedTextElement::from_str(
-            "Starting at $18 / mo, available with monthly or annual plans. Includes base credits, \
-             frontier models, cloud agents, collaboration, and more.",
+            "Desde USD 18/mes, planes mensuales o anuales. Incluye créditos base, modelos \
+             frontier, cloud agents, colaboración y más.",
             appearance.ui_font_family(),
             14.,
         )
@@ -298,7 +298,7 @@ impl AiAccessSlide {
 
         let label = appearance
             .ui_builder()
-            .paragraph("Set up later")
+            .paragraph("Configurar después")
             .with_style(UiComponentStyles {
                 font_size: Some(16.),
                 font_weight: Some(Weight::Semibold),
@@ -309,8 +309,8 @@ impl AiAccessSlide {
             .finish();
 
         let description = FormattedTextElement::from_str(
-            "Explore Warp's built-in AI features before committing to a plan, or bring your own \
-             inference.",
+            "Explorá la IA de Warp sin plan, o usá tu propia inferencia. Ideal si solo querés el \
+             monitor de agentes externos.",
             appearance.ui_font_family(),
             14.,
         )
@@ -340,7 +340,7 @@ impl AiAccessSlide {
         let back_button = self.back_button.render(
             appearance,
             button::Params {
-                content: button::Content::Label("Back".into()),
+                content: button::Content::Label("Atrás".into()),
                 theme: &button::themes::Naked,
                 options: button::Options {
                     on_click: Some(Box::new(|ctx, _app, _pos| {
@@ -355,7 +355,7 @@ impl AiAccessSlide {
         let next_button = self.next_button.render(
             appearance,
             button::Params {
-                content: button::Content::Label("Next".into()),
+                content: button::Content::Label("Siguiente".into()),
                 theme: &button::themes::Primary,
                 options: button::Options {
                     keystroke: Some(enter),
@@ -418,7 +418,7 @@ impl AiAccessSlide {
 
         let copy_url_link = ui_builder
             .link(
-                "copy the URL".into(),
+                "copiá la URL".into(),
                 None,
                 Some(Box::new(|ctx| {
                     ctx.dispatch_typed_action(AiAccessSlideAction::CopyUpgradeUrlClicked);
@@ -432,7 +432,7 @@ impl AiAccessSlide {
 
         let paste_token_link = ui_builder
             .link(
-                "Click here".into(),
+                "Hacé clic acá".into(),
                 None,
                 Some(Box::new(|ctx| {
                     ctx.dispatch_typed_action(
@@ -452,7 +452,7 @@ impl AiAccessSlide {
             .with_child(
                 Container::new(
                     ui_builder
-                        .span("If your browser hasn't launched, ")
+                        .span("Si el navegador no abrió, ")
                         .with_style(text_styles)
                         .build()
                         .finish(),
@@ -463,7 +463,7 @@ impl AiAccessSlide {
             .with_child(copy_url_link)
             .with_child(
                 ui_builder
-                    .span(" and open the page manually. ")
+                    .span(" y abrí la página a mano. ")
                     .with_style(text_styles)
                     .build()
                     .finish(),
@@ -471,7 +471,7 @@ impl AiAccessSlide {
             .with_child(paste_token_link)
             .with_child(
                 ui_builder
-                    .span(" to paste your token from the browser.")
+                    .span(" para pegar el token del navegador.")
                     .with_style(text_styles)
                     .build()
                     .finish(),

@@ -99,9 +99,9 @@ Focus terminal / detalle existente
 |-----------|---------------------|---------------------|-----|
 | **Codex** | `CLIAgent::Codex` + eventos OSC/plugin / app-server | Alta si se consume topology de app-server / spawn metadata | **P0** — raíz + tasks/subagents cuando el contrato lo exponga |
 | **Claude Code** | `CLIAgent::Claude` + rich plugin events | Media–alta vía JSONL / eventos de sesión | **P0** — raíz + hijos si hay IDs; si no, hoja con estado |
-| **Grok** (CLI/runner) | Depende del binario/stream | Baja al inicio | **P1** — hoja con estado de proceso/sesión |
-| **Kimi** | Idem | Baja | **P1** — hoja |
-| **MiniMax** | Idem | Muy baja (sin contrato oficial de subagents) | **P1** — hoja / process-only |
+| **Grok** (CLI/runner) | `CLIAgent::Grok` + tokens `grok`/`xai` | Baja (sin topology de subagents) | **P0** — hoja nombrada + focus al terminal |
+| **Kimi** | `CLIAgent::Kimi` + tokens `kimi`/`moonshot` | Baja | **P0** — hoja nombrada |
+| **MiniMax** | `CLIAgent::MiniMax` + tokens `minimax`/`mini-max` | Baja | **P0** — hoja nombrada |
 | **Hermes / Gemini / otros CLI** | Ya existen en `CLIAgent` | Variable | **P1/P2** — misma pipeline de adapters |
 | **Warp Oz / Agent Mode** | `AgentConversationsModel` | Alta nativa | **P2 opcional** — no bloquear el MVP externo |
 

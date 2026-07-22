@@ -268,6 +268,42 @@ fn external_cli_sessions_are_primary_leaves_without_warp_ai() {
 }
 
 #[test]
+fn grok_kimi_minimax_sessions_are_named_leaves_with_empty_topology() {
+    let grok = cli_session(CLIAgent::Grok, CLIAgentSessionStatus::InProgress, None);
+    let kimi = cli_session(CLIAgent::Kimi, CLIAgentSessionStatus::InProgress, None);
+    let minimax = cli_session(CLIAgent::MiniMax, CLIAgentSessionStatus::Success, None);
+
+    let snapshots = AgentTabsProjection::external_sessions_from_model([
+        (EntityId::from_usize(3), &minimax),
+        (EntityId::from_usize(1), &grok),
+        (EntityId::from_usize(2), &kimi),
+    ]);
+    let projection = AgentTabsProjection::from_snapshots([], snapshots);
+
+    // Sort order: after Gemini, before Hermes → Grok, Kimi, MiniMax.
+    assert_eq!(projection.nodes.len(), 3);
+    assert_eq!(
+        projection
+            .nodes
+            .iter()
+            .map(|node| (node.external_provider, node.display_label.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (Some(ExternalProvider::Grok), "Grok"),
+            (Some(ExternalProvider::Kimi), "Kimi"),
+            (Some(ExternalProvider::MiniMax), "MiniMax"),
+        ]
+    );
+    assert!(projection.nodes.iter().all(|node| {
+        node.kind == AgentTabKind::ExternalSession
+            && node.depth == 0
+            && node.parent_id.is_none()
+            && !node.has_children
+            && node.descendants == AgentHierarchyCounts::default()
+    }));
+}
+
+#[test]
 fn external_cli_roots_precede_optional_oz_hierarchy() {
     let root = id(1);
     let codex = ExternalAgentSessionSnapshot {
@@ -307,16 +343,24 @@ fn external_codex_tree_attaches_structured_subagents_under_the_root() {
             ExternalChildSnapshot {
                 parent_terminal_view_id: parent,
                 child_key: "thread-b".into(),
+                parent_child_key: None,
                 display_label: "security".into(),
                 status: AgentTabStatus::Blocked,
                 depth: 1,
+                task_summary: None,
+                activity: None,
+                last_event_ms: None,
             },
             ExternalChildSnapshot {
                 parent_terminal_view_id: parent,
                 child_key: "thread-a".into(),
+                parent_child_key: None,
                 display_label: "architecture".into(),
                 status: AgentTabStatus::Working,
                 depth: 1,
+                task_summary: Some("Tarea: architecture".into()),
+                activity: Some("exec · buscando en la web".into()),
+                last_event_ms: None,
             },
         ],
     };
@@ -405,4 +449,142 @@ fn projection_carries_native_root_and_task_labels_without_title_grouping() {
     assert_eq!(projection.nodes[0].display_label, "Gonzalo");
     assert_eq!(projection.nodes[1].display_label, "Monitor gateway");
     assert_eq!(projection.nodes[1].parent_id, Some(MonitorNodeId::Oz(root)));
+}
+
+#[test]
+fn enrich_with_ops_injects_goal_between_agent_and_tasks() {
+    use crate::workspace::agent_ops::{
+        AgentOpsEvent, AgentOpsStore, EventEnvelope, EventSource,
+    };
+
+    let parent = EntityId::from_usize(7);
+    let session = ExternalAgentSessionSnapshot {
+        terminal_view_id: parent,
+        provider: ExternalProvider::Claude,
+        profile_key: "pane-7".into(),
+        status: AgentTabStatus::Working,
+        session_id: None,
+        children: vec![ExternalChildSnapshot {
+            parent_terminal_view_id: parent,
+            child_key: "task-1".into(),
+            parent_child_key: None,
+            display_label: "Implement runtime".into(),
+            status: AgentTabStatus::Working,
+            depth: 1,
+            task_summary: None,
+            activity: None,
+            last_event_ms: None,
+        }],
+    };
+    let mut projection = AgentTabsProjection::from_snapshots([], [session]);
+    let mut store = AgentOpsStore::default();
+    assert!(store.apply(EventEnvelope::new(
+        1,
+        1,
+        EventSource::NativeAgent,
+        AgentOpsEvent::GoalProgress {
+            agent_id: format!("pane-{parent}"),
+            goal_id: "daytona".into(),
+            title: Some("Integrar Daytona".into()),
+            completed: 3,
+            total: 10,
+        },
+    )));
+    projection.enrich_with_ops(&store);
+
+    // Agent → Goal → Task
+    assert_eq!(projection.nodes.len(), 3);
+    assert_eq!(projection.nodes[0].kind, AgentTabKind::ExternalSession);
+    assert_eq!(projection.nodes[1].kind, AgentTabKind::Goal);
+    assert!(projection.nodes[1].display_label.contains("Integrar Daytona"));
+    assert_eq!(
+        projection.nodes[1].parent_id,
+        Some(MonitorNodeId::External(parent))
+    );
+    assert_eq!(projection.nodes[2].kind, AgentTabKind::Task);
+    assert_eq!(
+        projection.nodes[2].parent_id,
+        Some(MonitorNodeId::ExternalGoal {
+            parent,
+            goal_key: "daytona".into(),
+        })
+    );
+    assert_eq!(projection.nodes[2].depth, 2);
+}
+
+
+#[test]
+fn nested_agent_path_builds_parent_child_keys() {
+    let jsonl = r#"
+{"type":"event_msg","payload":{"type":"sub_agent_activity","agent_thread_id":"aaaa-1111-2222-3333-bbbbbbbbbbbb","agent_path":"/root/argentina","kind":"started"}}
+{"type":"event_msg","payload":{"type":"sub_agent_activity","agent_thread_id":"cccc-1111-2222-3333-dddddddddddd","agent_path":"/root/argentina/fuentes","kind":"started"}}
+"#;
+    let nodes = parse_codex_subagent_topology(jsonl);
+    assert_eq!(nodes.len(), 2);
+    let fuentes = nodes.iter().find(|n| n.display_label == "fuentes").expect("fuentes");
+    let argentina = nodes.iter().find(|n| n.display_label == "argentina").expect("argentina");
+    assert_eq!(fuentes.depth, 2);
+    assert_eq!(argentina.depth, 1);
+    assert_eq!(
+        fuentes.parent_child_key.as_deref(),
+        Some(argentina.child_key.as_str())
+    );
+    assert!(argentina.parent_child_key.is_none());
+}
+
+#[test]
+fn parent_rollup_secondary_lists_working_and_done() {
+    let parent = EntityId::from_usize(9);
+    let session = ExternalAgentSessionSnapshot {
+        terminal_view_id: parent,
+        provider: ExternalProvider::Codex,
+        profile_key: "p".into(),
+        status: AgentTabStatus::Working,
+        session_id: Some("p".into()),
+        children: vec![
+            ExternalChildSnapshot {
+                parent_terminal_view_id: parent,
+                child_key: "a".into(),
+                parent_child_key: None,
+                display_label: "a".into(),
+                status: AgentTabStatus::Working,
+                depth: 1,
+                task_summary: Some("Tarea: a".into()),
+                activity: Some("web".into()),
+                last_event_ms: None,
+            },
+            ExternalChildSnapshot {
+                parent_terminal_view_id: parent,
+                child_key: "b".into(),
+                parent_child_key: None,
+                display_label: "b".into(),
+                status: AgentTabStatus::Completed,
+                depth: 1,
+                task_summary: None,
+                activity: None,
+                last_event_ms: None,
+            },
+        ],
+    };
+    let projection = AgentTabsProjection::from_snapshots([], [session]);
+    let root = &projection.nodes[0];
+    assert_eq!(root.ops_primary.as_deref(), Some("2 subagents"));
+    assert!(root
+        .ops_secondary
+        .as_deref()
+        .unwrap_or("")
+        .contains("1 trabajando"));
+    assert!(root
+        .ops_secondary
+        .as_deref()
+        .unwrap_or("")
+        .contains("1 completado"));
+    // child keeps activity line
+    let child_a = projection
+        .nodes
+        .iter()
+        .find(|n| n.display_label == "a")
+        .unwrap();
+    assert_eq!(child_a.ops_primary.as_deref(), Some("trabajando"));
+    assert_eq!(child_a.ops_secondary.as_deref(), Some("web"));
 }

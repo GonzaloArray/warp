@@ -1,7 +1,12 @@
 mod action;
 mod active_session;
+pub(crate) mod agent_monitor_ui;
+pub(crate) mod agent_ops;
+pub(crate) mod agent_presentation;
+pub(crate) mod agent_project;
 pub(crate) mod agent_provider_hub;
 pub mod agent_tabs_projection;
+pub(crate) mod codex_session_shell;
 pub(crate) mod auto_handoff;
 pub mod bonus_grant_notification_model;
 #[cfg(target_os = "macos")]

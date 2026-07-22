@@ -490,7 +490,7 @@ use crate::workflows::{
     WorkflowViewMode,
 };
 use crate::workspace::action::CommandSearchOptions;
-use crate::workspace::agent_tabs_projection::AgentTabsProjection;
+use crate::workspace::agent_tabs_projection::{AgentTabsProjection, MonitorNodeId};
 use crate::workspace::bonus_grant_notification_model::BonusGrantNotificationEvent;
 #[cfg(target_os = "macos")]
 use crate::workspace::cli_install;
@@ -1160,6 +1160,11 @@ pub struct Workspace {
     vertical_tabs_panel_open: bool,
     vertical_tabs_panel: VerticalTabsPanelState,
     agent_monitor_auto_revealed: bool,
+    /// Ops domain store (multi-dim state + alerts). Seeded from disk; live CLI
+    /// session events update it. Projection enrichment reads this on refresh.
+    agent_ops_store: crate::workspace::agent_ops::AgentOpsStore,
+    /// User-created agent projects (accordion roots in the rail).
+    agent_projects: crate::workspace::agent_project::AgentProjectStore,
     agent_monitor_profile_editor: ViewHandle<AgentProfileEditorView>,
     is_agent_monitor_profile_editor_open: bool,
     left_panel_view: ViewHandle<LeftPanelView>,
@@ -1457,6 +1462,17 @@ impl Workspace {
                 store.upsert(profile.clone());
                 if let Err(error) = store.save_default() {
                     log::warn!("Unable to save agent profiles: {error}");
+                }
+                // Keep AgentProject display_name in sync when editing a project root.
+                if profile.provider == "project" {
+                    if let Some(project) = self.agent_projects.get_mut(&profile.agent_key) {
+                        project.display_name = profile.display_name.clone();
+                        project.updated_at_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+                        let _ = self.agent_projects.save_default();
+                    }
                 }
                 self.is_agent_monitor_profile_editor_open = false;
             }
@@ -3565,6 +3581,10 @@ impl Workspace {
                 panel
             },
             agent_monitor_auto_revealed: false,
+            agent_ops_store: crate::workspace::agent_ops::AgentOpsStore::load(
+                &crate::workspace::agent_ops::AgentOpsStore::default_path(),
+            ),
+            agent_projects: crate::workspace::agent_project::AgentProjectStore::load_default(),
             agent_monitor_profile_editor,
             is_agent_monitor_profile_editor_open: false,
             left_panel_view,
@@ -3822,8 +3842,200 @@ impl Workspace {
                 | CLIAgentSessionsModelEvent::SessionUpdated { .. }
         ) && self.workspace_contains_terminal_view(event.terminal_view_id(), ctx)
         {
+            self.apply_cli_session_to_agent_ops(event, ctx);
             self.auto_reveal_agent_monitor(ctx);
             ctx.notify();
+        }
+    }
+
+    /// Map structured CLI session transitions into AgentOpsStore (Batch 4).
+    /// Heuristic authority: CLI status is process-observed, not native JSONL.
+    fn apply_cli_session_to_agent_ops(
+        &mut self,
+        event: &CLIAgentSessionsModelEvent,
+        ctx: &AppContext,
+    ) {
+        use crate::terminal::cli_agent_sessions::CLIAgentSessionStatus;
+        use crate::workspace::agent_ops::{
+            AgentOpsEvent, EscalationPolicy, EventEnvelope, EventSource, SuppressContext,
+            draft_alert_for_execution, should_suppress_new, tick_alerts,
+        };
+        use crate::workspace::agent_tabs_projection::ExternalProvider;
+
+        let terminal_view_id = event.terminal_view_id();
+        let Some(session) = CLIAgentSessionsModel::as_ref(ctx).session(terminal_view_id) else {
+            return;
+        };
+        // Pane-scoped identity matches projection ops keys (not session_id),
+        // so late plugin session ids do not orphan AgentRecord / alerts.
+        let agent_id = format!("pane-{terminal_view_id}");
+        let display = ExternalProvider::from_cli(session.agent)
+            .map(|p| p.display_name())
+            .unwrap_or("Agent CLI");
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let focused_agent_id = self
+            .active_terminal_id(ctx)
+            .map(|id| format!("pane-{id}"));
+        let prompt_visible = CLIAgentSessionsModel::as_ref(ctx)
+            .session(terminal_view_id)
+            .is_some_and(|s| {
+                matches!(
+                    s.input_state,
+                    crate::terminal::cli_agent_sessions::CLIAgentInputState::Open { .. }
+                )
+            });
+        let suppress_ctx = SuppressContext {
+            focused_agent_id: focused_agent_id.clone(),
+            prompt_visible,
+            intentional_cancel: false,
+            intentional_runtime_stop: matches!(event, CLIAgentSessionsModelEvent::Ended { .. }),
+            silenced_keys: Vec::new(),
+        };
+
+        let (ops_event, alert_exec, reason) = match event {
+            CLIAgentSessionsModelEvent::StatusChanged { status, .. } => match status {
+                CLIAgentSessionStatus::InProgress => (
+                    AgentOpsEvent::AgentActivityChanged {
+                        agent_id: agent_id.clone(),
+                        activity: session
+                            .session_context
+                            .tool_name
+                            .clone()
+                            .or_else(|| session.session_context.summary.clone())
+                            .unwrap_or_else(|| "working".into()),
+                    },
+                    None,
+                    None,
+                ),
+                CLIAgentSessionStatus::Success => (
+                    AgentOpsEvent::AgentCompleted {
+                        agent_id: agent_id.clone(),
+                    },
+                    Some(crate::workspace::agent_ops::ExecutionState::Completed),
+                    None,
+                ),
+                CLIAgentSessionStatus::Failed { message, .. } => {
+                    let reason = message.clone().unwrap_or_else(|| "failed".into());
+                    (
+                        AgentOpsEvent::AgentFailed {
+                            agent_id: agent_id.clone(),
+                            reason: reason.clone(),
+                        },
+                        Some(crate::workspace::agent_ops::ExecutionState::Failed),
+                        Some(reason),
+                    )
+                }
+                CLIAgentSessionStatus::Blocked { message } => {
+                    let reason = message.clone().unwrap_or_else(|| "blocked".into());
+                    (
+                        AgentOpsEvent::AgentBlocked {
+                            agent_id: agent_id.clone(),
+                            reason: reason.clone(),
+                        },
+                        Some(crate::workspace::agent_ops::ExecutionState::Blocked),
+                        Some(reason),
+                    )
+                }
+            },
+            CLIAgentSessionsModelEvent::Ended { .. } => (
+                AgentOpsEvent::RuntimeDisconnected {
+                    runtime_id: format!("local-{terminal_view_id}"),
+                    agent_id: agent_id.clone(),
+                },
+                None,
+                None,
+            ),
+            CLIAgentSessionsModelEvent::Started { .. } => (
+                AgentOpsEvent::RuntimeOnline {
+                    runtime_id: format!("local-{terminal_view_id}"),
+                    agent_id: agent_id.clone(),
+                },
+                None,
+                None,
+            ),
+            _ => return,
+        };
+
+        let is_end_or_disconnect = matches!(
+            event,
+            CLIAgentSessionsModelEvent::Ended { .. }
+        );
+        let seq = self.agent_ops_store.next_sequence();
+        let envelope = EventEnvelope::new(seq, now_ms, EventSource::Heuristic, ops_event);
+        let applied = self.agent_ops_store.apply(envelope);
+
+        // Structured goal from CLI session context (query/summary) when present.
+        // Never emit GoalProgress on Ended/disconnect — goal metadata must not
+        // re-enter after RuntimeDisconnected (dimension isolation).
+        if applied && !is_end_or_disconnect {
+            if let Some(goal_title) = session
+                .session_context
+                .query
+                .as_deref()
+                .or(session.session_context.summary.as_deref())
+                .filter(|s| !s.is_empty())
+            {
+                let goal_seq = self.agent_ops_store.next_sequence();
+                let goal_env = EventEnvelope::new(
+                    goal_seq,
+                    now_ms,
+                    EventSource::Heuristic,
+                    AgentOpsEvent::GoalProgress {
+                        agent_id: agent_id.clone(),
+                        goal_id: session
+                            .session_context
+                            .session_id
+                            .clone()
+                            .unwrap_or_else(|| format!("goal-{terminal_view_id}")),
+                        title: Some(goal_title.chars().take(80).collect()),
+                        completed: 0,
+                        total: 0,
+                    },
+                );
+                let _ = self.agent_ops_store.apply(goal_env);
+            }
+        }
+
+        if applied {
+            if let Some(exec) = alert_exec {
+                if let Some(draft) = draft_alert_for_execution(
+                    &agent_id,
+                    display,
+                    exec,
+                    reason.as_deref(),
+                    now_ms,
+                ) {
+                    if !should_suppress_new(
+                        draft.category,
+                        draft.agent_id.as_deref(),
+                        &draft.deduplication_key,
+                        &self.agent_ops_store.alerts,
+                        &suppress_ctx,
+                    ) {
+                        self.agent_ops_store.alerts.upsert(draft, now_ms);
+                    }
+                }
+            }
+            // Age open alerts (escalation / expiration) on every live transition.
+            let _ = tick_alerts(
+                &mut self.agent_ops_store.alerts,
+                now_ms,
+                &EscalationPolicy::default(),
+            );
+            let _ = self
+                .agent_ops_store
+                .save(&crate::workspace::agent_ops::AgentOpsStore::default_path());
+        } else {
+            // Even when the primary event is rejected (ordering), still tick clocks.
+            let _ = tick_alerts(
+                &mut self.agent_ops_store.alerts,
+                now_ms,
+                &EscalationPolicy::default(),
+            );
         }
     }
 
@@ -6708,7 +6920,76 @@ impl Workspace {
         let reopen_closed_session_shortcut_label =
             keybinding_name_to_display_string("app:reopen_closed_session", ctx);
 
-        // 1. Agent (if AI enabled)
+        // 1. External CLI agents first — this fork's primary path (Codex/Claude/…).
+        //    Must be above Terminal so the + menu shows them without scrolling.
+        {
+            use crate::workspace::agent_provider_hub::{
+                AgentProviderHubPrefs, AgentProviderId, AgentProviderLaunchMode, command_on_path,
+            };
+
+            let prefs = AgentProviderHubPrefs::load_default();
+            let mut providers: Vec<AgentProviderId> = AgentProviderId::ALL
+                .into_iter()
+                .filter(|id| prefs.is_enabled(*id))
+                .collect();
+            if providers.is_empty() {
+                providers = AgentProviderId::DEFAULT_ENABLED.to_vec();
+            }
+            // Prefer Codex + Claude at the top of the CLI block.
+            providers.sort_by_key(|id| match id {
+                AgentProviderId::Codex => 0,
+                AgentProviderId::Claude => 1,
+                _ => 10,
+            });
+
+            for provider in providers {
+                let ready = provider
+                    .detect_commands()
+                    .iter()
+                    .any(|cmd| command_on_path(cmd));
+                let status = if ready { "listo" } else { "instalar CLI" };
+                let modes = if provider.supports_resume() {
+                    &[
+                        AgentProviderLaunchMode::NewSession,
+                        AgentProviderLaunchMode::ResumeLast,
+                    ][..]
+                } else {
+                    &[AgentProviderLaunchMode::NewSession][..]
+                };
+                for mode in modes {
+                    let primary = format!(
+                        "{} · {}",
+                        provider.display_name(),
+                        provider.launch_action_label(*mode)
+                    );
+                    let secondary = format!("{status} · `{}`", provider.launch_shell_line(*mode));
+                    menu_items.push(
+                        MenuItemFields::new_with_label(primary, secondary)
+                            .with_on_select_action(WorkspaceAction::LaunchAgentProvider {
+                                provider,
+                                mode: *mode,
+                            })
+                            .with_icon(provider.menu_icon())
+                            .with_tooltip(provider.launch_tooltip(*mode))
+                            .into_item(),
+                    );
+                }
+            }
+            menu_items.push(
+                MenuItemFields::new("Configurar proveedores CLI…")
+                    .with_on_select_action(WorkspaceAction::ShowSettingsPage(
+                        crate::settings_view::SettingsSection::ThirdPartyCLIAgents,
+                    ))
+                    .with_icon(icons::Icon::Gear)
+                    .with_tooltip(
+                        "Activá/desactivá proveedores y Launch desde Ajustes → Agents.",
+                    )
+                    .into_item(),
+            );
+            menu_items.push(MenuItem::Separator);
+        }
+
+        // 2. Agent (Warp AI, if enabled)
         if is_any_ai_enabled {
             let mut agent_item = MenuItemFields::new("Agent")
                 .with_on_select_action(WorkspaceAction::AddAgentTab)
@@ -6719,7 +7000,7 @@ impl Workspace {
             menu_items.push(agent_item.into_item());
         }
 
-        // 2. Terminal (+ individual shells on Windows)
+        // 3. Terminal (+ individual shells on Windows)
         {
             // On Windows, list the default terminal and each available shell as
             // individual top-level items (no submenu) so each gets a sidecar.
@@ -6772,33 +7053,6 @@ impl Workspace {
                     terminal_item = terminal_item.with_key_shortcut_label(shortcut_label.clone());
                 }
                 menu_items.push(terminal_item.into_item());
-            }
-        }
-
-        // 2b. External CLI agents — quick launch (Claude, Codex, Grok, …).
-        // Preferences live in Settings; this menu is the fast path.
-        {
-            use crate::workspace::agent_provider_hub::{
-                AgentProviderHubPrefs, AgentProviderId,
-            };
-
-            let prefs = AgentProviderHubPrefs::load_default();
-            let mut providers: Vec<AgentProviderId> = AgentProviderId::ALL
-                .into_iter()
-                .filter(|id| prefs.is_enabled(*id))
-                .collect();
-            if providers.is_empty() {
-                providers = AgentProviderId::DEFAULT_ENABLED.to_vec();
-            }
-
-            menu_items.push(MenuItem::Separator);
-            for provider in providers {
-                menu_items.push(
-                    MenuItemFields::new(provider.display_name())
-                        .with_on_select_action(WorkspaceAction::LaunchAgentProvider { provider })
-                        .with_icon(provider.menu_icon())
-                        .into_item(),
-                );
             }
         }
 
@@ -6960,7 +7214,9 @@ impl Workspace {
             - anchor_y
             - NEW_SESSION_MENU_WINDOW_MARGIN
             - NEW_SESSION_MENU_CHROME_HEIGHT;
-        available_height.max(NEW_SESSION_MENU_MIN_HEIGHT)
+        // CLI launch block alone is tall (Nueva sesión + Resume per provider).
+        // Floor at 320 so the + menu never collapses to only Terminal.
+        available_height.max(NEW_SESSION_MENU_MIN_HEIGHT).max(320.)
     }
 
     fn new_session_menu_height_anchor_y(
@@ -8046,36 +8302,54 @@ impl Workspace {
         self.read_from_active_terminal_view(app, |terminal| terminal.id())
     }
 
-    /// Snapshot consumed by the vertical-tabs monitor. This is intentionally a
-    /// single model query per refresh: row rendering must not inspect agent
-    /// models, terminal output, or profile files on its own.
+    /// CLI agent monitor tree for the vertical rail: external CLI roots
+    /// (Codex/Claude/…) with structured subagents under them.
+    ///
+    /// Oz *conversations* stay as normal workspace tabs (`AddAgentTab`). This
+    /// projection is only for live CLI sessions + trusted topology (e.g. Codex
+    /// `sub_agent_activity` JSONL) — not a parallel AgentProject accordion.
     pub(crate) fn agent_tabs_projection(&self, app: &AppContext) -> AgentTabsProjection {
-        let filters = AgentManagementFilters {
-            owners: OwnerFilter::All,
-            ..Default::default()
-        };
-        let oz_nodes = AgentConversationsModel::as_ref(app).get_hierarchy(&filters, app);
         let external_sessions = AgentTabsProjection::external_sessions_from_model(
             CLIAgentSessionsModel::as_ref(app).sessions_snapshot(),
         );
-        AgentTabsProjection::from_snapshots(oz_nodes, external_sessions)
+        let mut projection =
+            AgentTabsProjection::from_snapshots(std::iter::empty(), external_sessions);
+        projection.enrich_with_ops(&self.agent_ops_store);
+        projection
     }
 
-    /// Opens a terminal and launches the provider CLI. Warp remains the
-    /// observer: the CLI owns auth, models, and runtime.
+    pub(crate) fn agent_ops_store(&self) -> &crate::workspace::agent_ops::AgentOpsStore {
+        &self.agent_ops_store
+    }
+
+    /// Opens a terminal and launches the provider CLI with a useful command
+    /// (new session or resume). Warp remains the observer: the CLI owns auth,
+    /// models, and runtime. The rail opens so the session lands in the monitor.
     fn launch_agent_provider(
         &mut self,
         provider: crate::workspace::agent_provider_hub::AgentProviderId,
+        mode: crate::workspace::agent_provider_hub::AgentProviderLaunchMode,
         ctx: &mut ViewContext<Self>,
     ) {
-        if !self.vertical_tabs_panel_open {
-            self.open_vertical_tabs_panel_if_enabled(ctx);
-        }
+        // Monitor-first: force the agent rail so the new session is visible.
+        self.ensure_agent_monitor_rail_visible(ctx);
+        // New tab inherits previous-dir when that setting is on (typical for
+        // project work) so the CLI starts in the repo the user is already in.
         self.add_terminal_tab(true, ctx);
-        let command = provider.launch_command();
+        let command = provider.launch_shell_line(mode);
+        // Terminal mode (not Warp AI agent mode): the external CLI is the agent.
         // Prefill + submit so the user lands in the provider immediately.
         // If the CLI is missing, the shell surfaces the install error.
-        self.insert_in_input(command, true, true, false, ctx);
+        if let Some(input) = self.get_active_input_view_handle(ctx) {
+            input.update(ctx, |input, ctx| {
+                input.set_input_mode_terminal(false, ctx);
+                input.replace_buffer_content(&command, ctx);
+                input.input_enter(ctx);
+                ctx.notify();
+            });
+        } else {
+            self.insert_in_input(&command, true, true, false, ctx);
+        }
         ctx.notify();
     }
 
@@ -23980,7 +24254,7 @@ impl TypedActionView for Workspace {
             WorkspaceAction::FocusAgentMonitor => {
                 ActionAccessibilityContent::Custom(AccessibilityContent::new(
                     "Agent monitor focused",
-                    "Use Enter or Space to select the active agent. Use Right Arrow to expand and Left Arrow to collapse.",
+                    "Use Enter to open. Use Space to expand or collapse. Use Up and Down arrows to move. Use Right Arrow to expand and Left Arrow to collapse.",
                     WarpA11yRole::ButtonRole,
                 ))
             }
@@ -24898,8 +25172,20 @@ impl TypedActionView for Workspace {
             } => {
                 self.open_agent_monitor_profile_editor(provider, agent_key, fallback_name, ctx);
             }
-            LaunchAgentProvider { provider } => {
-                self.launch_agent_provider(*provider, ctx);
+            CancelAgentMonitorProfileEditor => {
+                self.is_agent_monitor_profile_editor_open = false;
+                ctx.notify();
+            }
+            // Product: a new agent is a native conversation tab (same as Agent / ⌘T),
+            // with real vertical-tab chrome (rename, pin, close, color, ⋮).
+            CreateAgentProject { .. } => {
+                self.add_terminal_tab_with_new_agent_view(ctx);
+            }
+            AddAgentProjectTask { .. } | AddAgentProjectWorker { .. } => {
+                // Legacy accordion actions — no-op. Agents live as workspace tabs.
+            }
+            LaunchAgentProvider { provider, mode } => {
+                self.launch_agent_provider(*provider, *mode, ctx);
             }
             SetAgentProviderEnabled { provider, enabled } => {
                 self.set_agent_provider_enabled(*provider, *enabled, ctx);
@@ -25419,6 +25705,297 @@ impl TypedActionView for Workspace {
                 self.vertical_tabs_panel
                     .set_agent_monitor_expanded(node_id.clone(), *expanded);
                 ctx.notify();
+            }
+            SelectAgentMonitorNode { node_id } => {
+                self.vertical_tabs_panel
+                    .set_agent_monitor_selection(Some(node_id.clone()));
+                // Keep parent terminal focused in the center while showing detail.
+                if let MonitorNodeId::ExternalChild { parent, .. }
+                | MonitorNodeId::ExternalGoal { parent, .. } = node_id
+                {
+                    self.handle_action(
+                        &WorkspaceAction::FocusTerminalViewInWorkspace {
+                            terminal_view_id: *parent,
+                        },
+                        ctx,
+                    );
+                } else if let MonitorNodeId::External(id) = node_id {
+                    self.handle_action(
+                        &WorkspaceAction::FocusTerminalViewInWorkspace {
+                            terminal_view_id: *id,
+                        },
+                        ctx,
+                    );
+                }
+                ctx.notify();
+            }
+            ClearAgentMonitorSelection => {
+                self.vertical_tabs_panel.set_agent_monitor_selection(None);
+                ctx.notify();
+            }
+            CodexShellSelectParent { terminal_view_id } => {
+                if let Some(tv) = self.terminal_view(*terminal_view_id, ctx) {
+                    tv.update(ctx, |tv, ctx| {
+                        tv.apply_codex_shell_action(
+                            crate::terminal::view::codex_shell::CodexShellAction::SelectParent,
+                            ctx,
+                        );
+                    });
+                }
+            }
+            CodexShellSelectSubagent {
+                terminal_view_id,
+                child_key,
+            } => {
+                if let Some(tv) = self.terminal_view(*terminal_view_id, ctx) {
+                    let child_key = child_key.clone();
+                    tv.update(ctx, |tv, ctx| {
+                        tv.apply_codex_shell_action(
+                            crate::terminal::view::codex_shell::CodexShellAction::SelectSubagent {
+                                child_key,
+                            },
+                            ctx,
+                        );
+                    });
+                }
+            }
+            CodexShellCloseView { terminal_view_id } => {
+                if let Some(tv) = self.terminal_view(*terminal_view_id, ctx) {
+                    tv.update(ctx, |tv, ctx| {
+                        tv.apply_codex_shell_action(
+                            crate::terminal::view::codex_shell::CodexShellAction::CloseView,
+                            ctx,
+                        );
+                    });
+                }
+            }
+            CodexShellToggleHistory { terminal_view_id } => {
+                if let Some(tv) = self.terminal_view(*terminal_view_id, ctx) {
+                    tv.update(ctx, |tv, ctx| {
+                        tv.apply_codex_shell_action(
+                            crate::terminal::view::codex_shell::CodexShellAction::ToggleHistory,
+                            ctx,
+                        );
+                    });
+                }
+            }
+            CodexShellSelectHistory {
+                terminal_view_id,
+                child_key,
+            } => {
+                if let Some(tv) = self.terminal_view(*terminal_view_id, ctx) {
+                    let child_key = child_key.clone();
+                    tv.update(ctx, |tv, ctx| {
+                        tv.apply_codex_shell_action(
+                            crate::terminal::view::codex_shell::CodexShellAction::SelectHistory {
+                                child_key,
+                            },
+                            ctx,
+                        );
+                    });
+                }
+            }
+            CodexShellRemoveFromList {
+                terminal_view_id,
+                child_key,
+            } => {
+                if let Some(tv) = self.terminal_view(*terminal_view_id, ctx) {
+                    let child_key = child_key.clone();
+                    tv.update(ctx, |tv, ctx| {
+                        tv.apply_codex_shell_action(
+                            crate::terminal::view::codex_shell::CodexShellAction::RemoveFromList {
+                                child_key,
+                            },
+                            ctx,
+                        );
+                    });
+                }
+            }
+            CodexShellStop {
+                terminal_view_id,
+                child_key,
+            } => {
+                if let Some(tv) = self.terminal_view(*terminal_view_id, ctx) {
+                    let child_key = child_key.clone();
+                    tv.update(ctx, |tv, ctx| {
+                        tv.apply_codex_shell_action(
+                            crate::terminal::view::codex_shell::CodexShellAction::Stop {
+                                child_key,
+                            },
+                            ctx,
+                        );
+                    });
+                }
+            }
+            CodexShellDeleteHistory {
+                terminal_view_id,
+                history_id,
+            } => {
+                if let Some(tv) = self.terminal_view(*terminal_view_id, ctx) {
+                    let history_id = history_id.clone();
+                    tv.update(ctx, |tv, ctx| {
+                        tv.apply_codex_shell_action(
+                            crate::terminal::view::codex_shell::CodexShellAction::DeleteHistory {
+                                history_id,
+                            },
+                            ctx,
+                        );
+                    });
+                }
+            }
+            CodexShellClearHistory { terminal_view_id } => {
+                if let Some(tv) = self.terminal_view(*terminal_view_id, ctx) {
+                    tv.update(ctx, |tv, ctx| {
+                        tv.apply_codex_shell_action(
+                            crate::terminal::view::codex_shell::CodexShellAction::ClearHistory,
+                            ctx,
+                        );
+                    });
+                }
+            }
+            CodexShellToggleTechnicalDetails { terminal_view_id } => {
+                if let Some(tv) = self.terminal_view(*terminal_view_id, ctx) {
+                    tv.update(ctx, |tv, ctx| {
+                        tv.apply_codex_shell_action(
+                            crate::terminal::view::codex_shell::CodexShellAction::ToggleTechnicalDetails,
+                            ctx,
+                        );
+                    });
+                }
+            }
+            CodexShellToggleHistoryMultiSelect { terminal_view_id } => {
+                if let Some(tv) = self.terminal_view(*terminal_view_id, ctx) {
+                    tv.update(ctx, |tv, ctx| {
+                        tv.apply_codex_shell_action(
+                            crate::terminal::view::codex_shell::CodexShellAction::ToggleHistoryMultiSelect,
+                            ctx,
+                        );
+                    });
+                }
+            }
+            CodexShellToggleHistoryIdSelected {
+                terminal_view_id,
+                history_id,
+            } => {
+                if let Some(tv) = self.terminal_view(*terminal_view_id, ctx) {
+                    let history_id = history_id.clone();
+                    tv.update(ctx, |tv, ctx| {
+                        tv.apply_codex_shell_action(
+                            crate::terminal::view::codex_shell::CodexShellAction::ToggleHistoryIdSelected {
+                                history_id,
+                            },
+                            ctx,
+                        );
+                    });
+                }
+            }
+            CodexShellDeleteSelectedHistory { terminal_view_id } => {
+                if let Some(tv) = self.terminal_view(*terminal_view_id, ctx) {
+                    tv.update(ctx, |tv, ctx| {
+                        tv.apply_codex_shell_action(
+                            crate::terminal::view::codex_shell::CodexShellAction::DeleteSelectedHistory,
+                            ctx,
+                        );
+                    });
+                }
+            }
+            CodexShellCycleHistorySort { terminal_view_id } => {
+                if let Some(tv) = self.terminal_view(*terminal_view_id, ctx) {
+                    tv.update(ctx, |tv, ctx| {
+                        tv.apply_codex_shell_action(
+                            crate::terminal::view::codex_shell::CodexShellAction::CycleHistorySort,
+                            ctx,
+                        );
+                    });
+                }
+            }
+            CodexShellToggleHistoryErrorsFilter { terminal_view_id } => {
+                if let Some(tv) = self.terminal_view(*terminal_view_id, ctx) {
+                    tv.update(ctx, |tv, ctx| {
+                        tv.apply_codex_shell_action(
+                            crate::terminal::view::codex_shell::CodexShellAction::ToggleHistoryErrorsFilter,
+                            ctx,
+                        );
+                    });
+                }
+            }
+            CodexShellToggleHistoryFilesFilter { terminal_view_id } => {
+                if let Some(tv) = self.terminal_view(*terminal_view_id, ctx) {
+                    tv.update(ctx, |tv, ctx| {
+                        tv.apply_codex_shell_action(
+                            crate::terminal::view::codex_shell::CodexShellAction::ToggleHistoryFilesFilter,
+                            ctx,
+                        );
+                    });
+                }
+            }
+            CodexShellToggleTimelineGroup {
+                terminal_view_id,
+                group_key,
+            } => {
+                if let Some(tv) = self.terminal_view(*terminal_view_id, ctx) {
+                    let group_key = group_key.clone();
+                    tv.update(ctx, |tv, ctx| {
+                        tv.apply_codex_shell_action(
+                            crate::terminal::view::codex_shell::CodexShellAction::ToggleTimelineGroup {
+                                group_key,
+                            },
+                            ctx,
+                        );
+                    });
+                }
+            }
+            CodexShellSelectAllVisibleHistory {
+                terminal_view_id,
+                ids,
+            } => {
+                if let Some(tv) = self.terminal_view(*terminal_view_id, ctx) {
+                    let ids = ids.clone();
+                    tv.update(ctx, |tv, ctx| {
+                        tv.apply_codex_shell_action(
+                            crate::terminal::view::codex_shell::CodexShellAction::SelectAllVisibleHistory {
+                                ids,
+                            },
+                            ctx,
+                        );
+                    });
+                }
+            }
+            CodexShellSetHistoryQuery {
+                terminal_view_id,
+                query,
+            } => {
+                if let Some(tv) = self.terminal_view(*terminal_view_id, ctx) {
+                    let query = query.clone();
+                    tv.update(ctx, |tv, ctx| {
+                        tv.apply_codex_shell_action(
+                            crate::terminal::view::codex_shell::CodexShellAction::SetHistoryQuery {
+                                query,
+                            },
+                            ctx,
+                        );
+                    });
+                }
+            }
+            CodexShellToggleHistoryTodayFilter { terminal_view_id } => {
+                if let Some(tv) = self.terminal_view(*terminal_view_id, ctx) {
+                    tv.update(ctx, |tv, ctx| {
+                        tv.apply_codex_shell_action(
+                            crate::terminal::view::codex_shell::CodexShellAction::ToggleHistoryTodayFilter,
+                            ctx,
+                        );
+                    });
+                }
+            }
+            CodexShellRetryPendingArchives { terminal_view_id } => {
+                if let Some(tv) = self.terminal_view(*terminal_view_id, ctx) {
+                    tv.update(ctx, |tv, ctx| {
+                        tv.apply_codex_shell_action(
+                            crate::terminal::view::codex_shell::CodexShellAction::RetryPendingArchives,
+                            ctx,
+                        );
+                    });
+                }
             }
             ViewObjectInWarpDrive(item_id) => {
                 // Focus newly created object in WD
@@ -27642,14 +28219,33 @@ impl View for Workspace {
         }
 
         if self.is_agent_monitor_profile_editor_open {
-            let editor =
-                Container::new(ChildView::new(&self.agent_monitor_profile_editor).finish())
-                    .with_background(appearance.theme().surface_1())
-                    .with_uniform_padding(16.)
-                    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.)))
-                    .finish();
+            // Dimmed full-window scrim (desktop: Rect fills overlay parent) + card.
+            let scrim = EventHandler::new(
+                Rect::new()
+                    .with_background(internal_colors::fg_overlay_3(appearance.theme()))
+                    .finish(),
+            )
+            .on_left_mouse_down(|ctx, _, _| {
+                ctx.dispatch_typed_action(WorkspaceAction::CancelAgentMonitorProfileEditor);
+                DispatchEventResult::StopPropagation
+            })
+            .finish();
             stack.add_positioned_overlay_child(
-                editor,
+                scrim,
+                OffsetPositioning::offset_from_parent(
+                    Vector2F::zero(),
+                    ParentOffsetBounds::WindowByPosition,
+                    ParentAnchor::TopLeft,
+                    ChildAnchor::TopLeft,
+                ),
+            );
+            let card = Container::new(ChildView::new(&self.agent_monitor_profile_editor).finish())
+                .with_background(appearance.theme().surface_1())
+                .with_uniform_padding(20.)
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(10.)))
+                .finish();
+            stack.add_positioned_overlay_child(
+                card,
                 OffsetPositioning::offset_from_parent(
                     Vector2F::zero(),
                     ParentOffsetBounds::WindowByPosition,

@@ -105,6 +105,9 @@ impl AgentProviderId {
             CLIAgent::Claude => Some(Self::Claude),
             CLIAgent::Codex => Some(Self::Codex),
             CLIAgent::Gemini => Some(Self::Gemini),
+            CLIAgent::Grok => Some(Self::Grok),
+            CLIAgent::Kimi => Some(Self::Kimi),
+            CLIAgent::MiniMax => Some(Self::MiniMax),
             CLIAgent::OpenCode => Some(Self::OpenCode),
             CLIAgent::Hermes => Some(Self::Hermes),
             CLIAgent::CursorCli => Some(Self::Cursor),
@@ -126,6 +129,102 @@ impl AgentProviderId {
             Self::Grok | Self::Kimi | Self::MiniMax | Self::Hermes => Icon::AiAssistant,
         }
     }
+
+    /// Whether this provider exposes a first-class “continue last session” path.
+    pub(crate) fn supports_resume(self) -> bool {
+        matches!(
+            self,
+            Self::Claude | Self::Codex | Self::OpenCode | Self::Gemini
+        )
+    }
+
+    /// Full shell line for Launch (New session vs Resume last).
+    ///
+    /// These are intentional product defaults — not a generic “type the binary
+    /// name” dump. Auth/models still live with the CLI.
+    pub(crate) fn launch_shell_line(self, mode: AgentProviderLaunchMode) -> String {
+        match (self, mode) {
+            (Self::Claude, AgentProviderLaunchMode::NewSession) => "claude".to_string(),
+            (Self::Claude, AgentProviderLaunchMode::ResumeLast) => {
+                "claude --continue".to_string()
+            }
+            (Self::Codex, AgentProviderLaunchMode::NewSession) => "codex".to_string(),
+            (Self::Codex, AgentProviderLaunchMode::ResumeLast) => {
+                "codex resume --last".to_string()
+            }
+            (Self::Gemini, AgentProviderLaunchMode::NewSession) => "gemini".to_string(),
+            (Self::Gemini, AgentProviderLaunchMode::ResumeLast) => {
+                "gemini --resume latest".to_string()
+            }
+            (Self::OpenCode, AgentProviderLaunchMode::NewSession) => "opencode".to_string(),
+            (Self::OpenCode, AgentProviderLaunchMode::ResumeLast) => "opencode".to_string(),
+            (Self::Grok, _) => "grok".to_string(),
+            (Self::Kimi, _) => "kimi".to_string(),
+            (Self::MiniMax, _) => "minimax".to_string(),
+            (Self::Hermes, _) => "hermes".to_string(),
+            (Self::Cursor, _) => "agent".to_string(),
+            (Self::Copilot, _) => "copilot".to_string(),
+        }
+    }
+
+    /// Short action label for menus (Spanish product copy for this fork).
+    pub(crate) fn launch_action_label(self, mode: AgentProviderLaunchMode) -> &'static str {
+        match mode {
+            AgentProviderLaunchMode::NewSession => "Nueva sesión",
+            AgentProviderLaunchMode::ResumeLast => match self {
+                Self::Claude => "Continuar última",
+                Self::Codex => "Resume última",
+                _ => "Continuar",
+            },
+        }
+    }
+
+    /// Tooltip explaining what Launch will do (more than “type codex”).
+    pub(crate) fn launch_tooltip(self, mode: AgentProviderLaunchMode) -> String {
+        use crate::workspace::agent_presentation::AgentUiProfile;
+        use crate::workspace::agent_tabs_projection::ExternalProvider;
+
+        let cmd = self.launch_shell_line(mode);
+        let blurb = ExternalProvider::from_cli(self.to_cli_agent())
+            .map(AgentUiProfile::for_provider)
+            .map(|p| p.capabilities_blurb)
+            .unwrap_or("CLI externo en el monitor de agentes");
+        match mode {
+            AgentProviderLaunchMode::NewSession => format!(
+                "Abre un terminal, lanza `{cmd}` y lo muestra en el rail. {blurb}."
+            ),
+            AgentProviderLaunchMode::ResumeLast => format!(
+                "Retoma la última sesión de {} con `{cmd}`. {blurb}.",
+                self.display_name()
+            ),
+        }
+    }
+
+    fn to_cli_agent(self) -> crate::terminal::CLIAgent {
+        match self {
+            Self::Claude => crate::terminal::CLIAgent::Claude,
+            Self::Codex => crate::terminal::CLIAgent::Codex,
+            Self::Gemini => crate::terminal::CLIAgent::Gemini,
+            Self::Grok => crate::terminal::CLIAgent::Grok,
+            Self::Kimi => crate::terminal::CLIAgent::Kimi,
+            Self::MiniMax => crate::terminal::CLIAgent::MiniMax,
+            Self::OpenCode => crate::terminal::CLIAgent::OpenCode,
+            Self::Hermes => crate::terminal::CLIAgent::Hermes,
+            Self::Cursor => crate::terminal::CLIAgent::CursorCli,
+            Self::Copilot => crate::terminal::CLIAgent::Copilot,
+        }
+    }
+}
+
+/// How the + menu / Settings Launch button starts a provider CLI.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentProviderLaunchMode {
+    /// Fresh interactive session for this provider.
+    #[default]
+    NewSession,
+    /// Continue / resume the most recent session when the CLI supports it.
+    ResumeLast,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

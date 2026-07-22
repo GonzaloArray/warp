@@ -2823,8 +2823,11 @@ fn test_vertical_tabs_panel_visibility_restores_from_window_snapshot() {
         let restored_closed = restored_workspace(&mut app, closed_snapshot);
         let restored_open = restored_workspace(&mut app, open_snapshot);
 
+        // Agent-monitor branch: configure_new_workspace always calls
+        // ensure_agent_monitor_rail_visible, so restored workspaces open the rail
+        // even when the snapshot had the panel closed.
         restored_closed.read(&app, |workspace, _| {
-            assert!(!workspace.vertical_tabs_panel_open);
+            assert!(workspace.vertical_tabs_panel_open);
         });
         restored_open.read(&app, |workspace, _| {
             assert!(workspace.vertical_tabs_panel_open);
@@ -2882,15 +2885,13 @@ fn test_vertical_tabs_panel_restored_open_when_show_in_restored_windows_enabled(
 
 #[test]
 fn test_vertical_tabs_panel_closed_when_disabled_even_if_persisted_open() {
-    // Regression for #9505: when `vertical_tabs_panel_open=true` is persisted
-    // and the user then disables vertical tabs, restoring the workspace must
-    // not honor the stale snapshot — otherwise a dismiss underlay paints over
-    // the window and silently swallows every click.
+    // Agent-monitor branch supersedes #9505 for this fork: the rail is primary
+    // navigation, so ensure_agent_monitor_rail_visible re-enables vertical tabs
+    // and opens the panel even if the user had them disabled before restore.
     let _vertical_tabs_guard = FeatureFlag::VerticalTabs.override_enabled(true);
     App::test((), |mut app| async move {
         initialize_app(&mut app);
 
-        // Snapshot the workspace with the panel open while vertical tabs are enabled.
         app.update(|ctx| {
             TabSettings::handle(ctx).update(ctx, |settings, ctx| {
                 report_if_error!(settings.use_vertical_tabs.set_value(true, ctx));
@@ -2902,15 +2903,15 @@ fn test_vertical_tabs_panel_closed_when_disabled_even_if_persisted_open() {
             workspace.snapshot(ctx.window_id(), false, ctx)
         });
 
-        // Disable vertical tabs, then restore. The panel must stay closed.
         app.update(|ctx| {
             TabSettings::handle(ctx).update(ctx, |settings, ctx| {
                 report_if_error!(settings.use_vertical_tabs.set_value(false, ctx));
             });
         });
         let restored = restored_workspace(&mut app, open_snapshot);
-        restored.read(&app, |workspace, _| {
-            assert!(!workspace.vertical_tabs_panel_open);
+        restored.read(&app, |workspace, ctx| {
+            assert!(workspace.vertical_tabs_panel_open);
+            assert!(*TabSettings::as_ref(ctx).use_vertical_tabs);
         });
     });
 }
@@ -2950,8 +2951,9 @@ fn test_vertical_tabs_panel_inherits_transferred_tab_source_window_state() {
         let transferred_closed = transferred_tab_workspace(&mut app, false);
         let transferred_open = transferred_tab_workspace(&mut app, true);
 
+        // Force-open rail applies to transferred-tab windows too.
         transferred_closed.read(&app, |workspace, _| {
-            assert!(!workspace.vertical_tabs_panel_open);
+            assert!(workspace.vertical_tabs_panel_open);
         });
         transferred_open.read(&app, |workspace, _| {
             assert!(workspace.vertical_tabs_panel_open);
@@ -2968,28 +2970,24 @@ fn test_vertical_tabs_panel_auto_shows_when_setting_enabled() {
 
         let workspace = mock_workspace(&mut app);
 
-        workspace.read(&app, |workspace, _| {
-            assert!(!workspace.vertical_tabs_panel_open);
+        // Agent monitor: rail is forced open at workspace configure time.
+        workspace.read(&app, |workspace, ctx| {
+            assert!(workspace.vertical_tabs_panel_open);
+            assert!(*TabSettings::as_ref(ctx).use_vertical_tabs);
         });
 
-        // Enabling vertical tabs should auto-open the panel.
-        workspace.update(&mut app, |_, ctx| {
+        // Toggling the setting still opens the panel when re-enabled.
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.vertical_tabs_panel_open = false;
+            TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings.use_vertical_tabs.set_value(false, ctx));
+            });
             TabSettings::handle(ctx).update(ctx, |settings, ctx| {
                 report_if_error!(settings.use_vertical_tabs.set_value(true, ctx));
             });
         });
         workspace.read(&app, |workspace, _| {
             assert!(workspace.vertical_tabs_panel_open);
-        });
-
-        // Disabling vertical tabs should auto-close the panel.
-        workspace.update(&mut app, |_, ctx| {
-            TabSettings::handle(ctx).update(ctx, |settings, ctx| {
-                report_if_error!(settings.use_vertical_tabs.set_value(false, ctx));
-            });
-        });
-        workspace.read(&app, |workspace, _| {
-            assert!(!workspace.vertical_tabs_panel_open);
         });
     });
 }
@@ -3277,18 +3275,73 @@ fn test_unified_new_session_menu_uses_new_worktree_config_label_and_order() {
 
             assert!(!labels.iter().any(|label| label == "Worktree in"));
 
-            let separator_index = labels
+            let worktree_index = labels
                 .iter()
-                .position(|label| label == "---")
-                .expect("expected a separator in the new-session menu");
-
+                .position(|label| label == "New worktree config")
+                .expect("expected New worktree config in the new-session menu");
             assert_eq!(
-                labels.get(separator_index + 1),
-                Some(&"New worktree config".to_string())
-            );
-            assert_eq!(
-                labels.get(separator_index + 2),
+                labels.get(worktree_index + 1),
                 Some(&"New tab config".to_string())
+            );
+            // Worktree block is preceded by a separator (after Terminal / configs).
+            assert_eq!(
+                labels.get(worktree_index.saturating_sub(1)),
+                Some(&"---".to_string())
+            );
+        });
+    });
+}
+
+#[test]
+fn test_unified_new_session_menu_leads_with_cli_agent_launch_items() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let labels = workspace
+                .unified_new_session_menu_items(ctx)
+                .iter()
+                .map(new_session_menu_label)
+                .collect::<Vec<_>>();
+
+            assert!(
+                labels
+                    .iter()
+                    .any(|l| l.starts_with("Codex · Nueva sesión")),
+                "expected Codex Nueva sesión in + menu, got {labels:?}"
+            );
+            assert!(
+                labels
+                    .iter()
+                    .any(|l| l.starts_with("Claude Code · Nueva sesión")),
+                "expected Claude Nueva sesión in + menu, got {labels:?}"
+            );
+            assert!(
+                labels
+                    .iter()
+                    .any(|l| l == "Configurar proveedores CLI…"),
+                "expected CLI settings entry, got {labels:?}"
+            );
+
+            // CLI block must precede Terminal so dogfood users see agents first.
+            let codex_idx = labels
+                .iter()
+                .position(|l| l.starts_with("Codex ·"))
+                .expect("Codex item");
+            let terminal_idx = labels
+                .iter()
+                .position(|l| l == "Terminal")
+                .expect("Terminal item");
+            assert!(
+                codex_idx < terminal_idx,
+                "CLI launches must appear before Terminal (codex={codex_idx}, terminal={terminal_idx})"
+            );
+            // Codex is sorted first among providers.
+            assert_eq!(
+                labels.first().map(String::as_str),
+                Some("Codex · Nueva sesión")
             );
         });
     });

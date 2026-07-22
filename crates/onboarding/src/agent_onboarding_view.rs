@@ -393,7 +393,7 @@ impl AgentOnboardingView {
         let cancel_button = self.no_ai_cancel_button.render(
             appearance,
             button::Params {
-                content: button::Content::Label("Give me AI features".into()),
+                content: button::Content::Label("Quiero funciones de IA".into()),
                 theme: &button::themes::Naked,
                 options: button::Options {
                     on_click: Some(Box::new(|ctx, _app, _pos| {
@@ -408,7 +408,7 @@ impl AgentOnboardingView {
         let confirm_button = self.no_ai_confirm_button.render(
             appearance,
             button::Params {
-                content: button::Content::Label("I don't want AI".into()),
+                content: button::Content::Label("No quiero IA".into()),
                 theme: &button::themes::Primary,
                 options: button::Options {
                     keystroke: Some(enter),
@@ -423,9 +423,9 @@ impl AgentOnboardingView {
         render_feature_optout_dialog(
             appearance,
             FeatureOptOutDialog {
-                title: "Are you sure you don't want AI?",
-                body: "Without AI, you'll still get Warp's terminal experience, but you'll miss \
-                       our agentic features like automatic fixes for terminal errors.",
+                title: "¿Seguro que no querés IA?",
+                body: "Sin IA seguís con el terminal de Warp, pero perdés funciones del agente \
+                       como arreglos automáticos de errores en el terminal.",
                 features: &[],
                 close_button,
                 cancel_button,
@@ -490,7 +490,7 @@ impl AgentOnboardingView {
         .finish();
 
         let text = ui_builder
-            .span("Plan successfully activated!")
+            .span("¡Plan activado!")
             .with_style(UiComponentStyles {
                 font_color: Some(text_color),
                 font_size: Some(FONT_SIZE),
@@ -572,8 +572,9 @@ impl View for AgentOnboardingView {
 
         let mut stack = Stack::new();
 
+        // Theme chrome only — brand art belongs in the right column (col 2),
+        // via `onboarding_right_panel_with_bg`, not full-window / sidebar.
         if let Some(img) = theme.background_image() {
-            // Render the image behind everything.
             stack.add_child(
                 Shrinkable::new(
                     1.,
@@ -583,8 +584,6 @@ impl View for AgentOnboardingView {
                 )
                 .finish(),
             );
-
-            // Overlay the theme background so the image shows through at img.opacity.
             let overlay_opacity = (100u8).saturating_sub(img.opacity);
             stack.add_child(
                 Rect::new()
@@ -620,7 +619,7 @@ impl View for AgentOnboardingView {
             let close_button = self.close_button.render(
                 appearance,
                 button::Params {
-                    content: button::Content::Label("Skip".into()),
+                    content: button::Content::Label("Omitir".into()),
                     theme: &button::themes::Naked,
                     options: button::Options {
                         size: button::Size::Small,

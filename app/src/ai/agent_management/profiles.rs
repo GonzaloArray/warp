@@ -29,6 +29,10 @@ pub(crate) struct AgentProfile {
     pub icon: AvatarKind,
     #[serde(default)]
     pub palette: Palette,
+    /// Absolute path to a local PNG/JPEG avatar. When set, takes precedence over
+    /// the built-in `icon` enum in the rail and profile editor preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_image_path: Option<String>,
 }
 
 /// The monitor deliberately accepts only icons compiled into Warp.  Keeping
@@ -112,6 +116,7 @@ impl AgentProfile {
                 display_name: sanitize_name(&display_name),
                 icon: AvatarKind::default(),
                 palette: Palette::default(),
+                avatar_image_path: None,
             })
         } else {
             None
@@ -134,6 +139,44 @@ impl AgentProfile {
         self.display_name = sanitize_name(display_name.as_ref());
         self.icon = icon;
         self.palette = palette;
+    }
+
+    pub(crate) fn set_avatar_image_path(&mut self, path: Option<String>) {
+        self.avatar_image_path = path.filter(|p| !p.is_empty());
+    }
+
+    /// Directory under config where we copy user PNG avatars (stable paths).
+    pub(crate) fn avatar_assets_dir() -> PathBuf {
+        warp_core::paths::config_local_dir().join("agent-avatars")
+    }
+
+    /// Copy a user-picked image into the profile avatar store and return the dest path.
+    pub(crate) fn import_avatar_image(
+        profile_key: &str,
+        source: &Path,
+    ) -> std::io::Result<PathBuf> {
+        let ext = source
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .filter(|e| matches!(e.as_str(), "png" | "jpg" | "jpeg" | "webp"))
+            .unwrap_or_else(|| "png".into());
+        let dir = Self::avatar_assets_dir();
+        fs::create_dir_all(&dir)?;
+        let safe_key: String = profile_key
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .take(80)
+            .collect();
+        let dest = dir.join(format!("{safe_key}.{ext}"));
+        fs::copy(source, &dest)?;
+        Ok(dest)
     }
 
     fn normalize(mut self) -> Option<Self> {
@@ -187,6 +230,10 @@ impl AgentProfileEditor {
 
     pub(crate) fn set_palette(&mut self, palette: Palette) {
         self.draft.palette = palette;
+    }
+
+    pub(crate) fn set_avatar_image_path(&mut self, path: Option<String>) {
+        self.draft.set_avatar_image_path(path);
     }
 
     pub(crate) fn cancel(self) -> AgentProfile {

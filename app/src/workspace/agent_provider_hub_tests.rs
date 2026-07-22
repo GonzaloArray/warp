@@ -2,8 +2,39 @@ use super::{
     AgentProviderHubPrefs, AgentProviderId, ProviderInstallState, ProviderHubRow, command_on_path,
     load, provider_hub_rows, save,
 };
+use crate::terminal::CLIAgent;
 use std::collections::HashMap;
 use tempfile::tempdir;
+
+#[test]
+fn from_cli_maps_grok_kimi_minimax() {
+    assert_eq!(
+        AgentProviderId::from_cli(CLIAgent::Grok),
+        Some(AgentProviderId::Grok)
+    );
+    assert_eq!(
+        AgentProviderId::from_cli(CLIAgent::Kimi),
+        Some(AgentProviderId::Kimi)
+    );
+    assert_eq!(
+        AgentProviderId::from_cli(CLIAgent::MiniMax),
+        Some(AgentProviderId::MiniMax)
+    );
+}
+
+#[test]
+fn from_cli_maps_known_catalog_agents() {
+    assert_eq!(
+        AgentProviderId::from_cli(CLIAgent::Claude),
+        Some(AgentProviderId::Claude)
+    );
+    assert_eq!(
+        AgentProviderId::from_cli(CLIAgent::Codex),
+        Some(AgentProviderId::Codex)
+    );
+    assert_eq!(AgentProviderId::from_cli(CLIAgent::Unknown), None);
+    assert_eq!(AgentProviderId::from_cli(CLIAgent::Amp), None);
+}
 
 #[test]
 fn default_prefs_enable_product_providers() {
@@ -62,6 +93,31 @@ fn hub_rows_combine_prefs_install_and_active_counts() {
         .find(|row| row.id == AgentProviderId::Cursor)
         .unwrap();
     assert!(!cursor.enabled);
+}
+
+#[test]
+fn launch_shell_lines_for_new_and_resume_are_non_empty() {
+    use super::AgentProviderLaunchMode;
+    for id in AgentProviderId::ALL {
+        let new = id.launch_shell_line(AgentProviderLaunchMode::NewSession);
+        assert!(!new.is_empty(), "{id:?} new session command empty");
+        assert!(
+            !new.contains(';') && !new.contains('|') && !new.contains('&'),
+            "{id:?} new command has shell metacharacters: {new}"
+        );
+        if id.supports_resume() {
+            let resume = id.launch_shell_line(AgentProviderLaunchMode::ResumeLast);
+            assert!(!resume.is_empty(), "{id:?} resume command empty");
+        }
+    }
+    assert_eq!(
+        AgentProviderId::Codex.launch_shell_line(AgentProviderLaunchMode::ResumeLast),
+        "codex resume --last"
+    );
+    assert_eq!(
+        AgentProviderId::Claude.launch_shell_line(AgentProviderLaunchMode::ResumeLast),
+        "claude --continue"
+    );
 }
 
 #[test]

@@ -7581,7 +7581,10 @@ fn render_agent_provider_hub_settings(
         })
         .with_cursor(Cursor::PointingHand)
         .on_click(move |ctx, _, _| {
-            ctx.dispatch_typed_action(WorkspaceAction::LaunchAgentProvider { provider });
+            ctx.dispatch_typed_action(WorkspaceAction::LaunchAgentProvider {
+                provider,
+                mode: crate::workspace::agent_provider_hub::AgentProviderLaunchMode::NewSession,
+            });
         })
         .finish();
 

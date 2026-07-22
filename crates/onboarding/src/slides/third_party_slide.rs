@@ -137,7 +137,7 @@ impl ThirdPartySlide {
     fn render_header(&self, appearance: &Appearance) -> Box<dyn Element> {
         let title = appearance
             .ui_builder()
-            .paragraph("Customize third party agents")
+            .paragraph("Configurá agentes de terceros")
             .with_style(UiComponentStyles {
                 font_size: Some(36.),
                 font_weight: Some(Weight::Medium),
@@ -147,7 +147,7 @@ impl ThirdPartySlide {
             .finish();
 
         let subtitle = FormattedTextElement::from_str(
-            "Select defaults for using agents like Claude Code, Codex, and Gemini.",
+            "Defaults del monitor para Claude, Codex, Grok y otros CLI. Después podés cambiarlos en Ajustes → Agents → Third party CLI agents.",
             appearance.ui_font_family(),
             16.,
         )
@@ -157,7 +157,21 @@ impl ThirdPartySlide {
         ))
         .with_weight(Weight::Normal)
         .with_alignment(TextAlignment::Left)
-        .with_line_height_ratio(1.0)
+        .with_line_height_ratio(1.2)
+        .finish();
+
+        let how_to = FormattedTextElement::from_str(
+            "Cómo se usa: menú + para lanzar · barra izquierda para el árbol de subagentes · clic en un nodo para ir al terminal.",
+            appearance.ui_font_family(),
+            14.,
+        )
+        .with_color(internal_colors::text_sub(
+            appearance.theme(),
+            appearance.theme().background().into_solid(),
+        ))
+        .with_weight(Weight::Normal)
+        .with_alignment(TextAlignment::Left)
+        .with_line_height_ratio(1.2)
         .finish();
 
         Flex::column()
@@ -165,6 +179,7 @@ impl ThirdPartySlide {
             .with_cross_axis_alignment(CrossAxisAlignment::Start)
             .with_child(title)
             .with_child(Container::new(subtitle).with_margin_top(16.).finish())
+            .with_child(Container::new(how_to).with_margin_top(12.).finish())
             .finish()
     }
 
@@ -178,11 +193,11 @@ impl ThirdPartySlide {
         let card = render_toggle_card(
             appearance,
             ToggleCardSpec {
-                title: "CLI agent toolbar",
+                title: "Barra de agentes CLI",
                 is_expanded: is_selected,
                 is_left_selected: cli_toolbar_enabled,
-                left_label: "Enabled",
-                right_label: "Disabled",
+                left_label: "Activada",
+                right_label: "Desactivada",
                 card_mouse_state: self.cli_toolbar_card_mouse_state.clone(),
                 on_expand: Box::new(|ctx, _, _| {
                     ctx.dispatch_typed_action(ThirdPartySlideAction::SelectSettingCard {
@@ -226,11 +241,11 @@ impl ThirdPartySlide {
         let card = render_toggle_card(
             appearance,
             ToggleCardSpec {
-                title: "Notifications",
+                title: "Notificaciones",
                 is_expanded: is_selected,
                 is_left_selected: show_agent_notifications,
-                left_label: "Enabled",
-                right_label: "Disabled",
+                left_label: "Activadas",
+                right_label: "Desactivadas",
                 card_mouse_state: self.notifications_card_mouse_state.clone(),
                 on_expand: Box::new(|ctx, _, _| {
                     ctx.dispatch_typed_action(ThirdPartySlideAction::SelectSettingCard {
@@ -268,7 +283,7 @@ impl ThirdPartySlide {
         let back_button = self.back_button.render(
             appearance,
             button::Params {
-                content: button::Content::Label("Back".into()),
+                content: button::Content::Label("Atrás".into()),
                 theme: &button::themes::Naked,
                 options: button::Options {
                     on_click: Some(Box::new(|ctx, _app, _pos| {
@@ -283,7 +298,7 @@ impl ThirdPartySlide {
         let next_button = self.next_button.render(
             appearance,
             button::Params {
-                content: button::Content::Label("Next".into()),
+                content: button::Content::Label("Siguiente".into()),
                 theme: &button::themes::Primary,
                 options: button::Options {
                     keystroke: Some(enter),

@@ -25,10 +25,18 @@ use crate::slides::{bottom_nav, layout, slide_content};
 
 /// Checklist shown on the "Use Warp agent" card.
 const WARP_AGENT_FEATURES: &[&str] = &[
-    "Best harness for terminal tasks and agentic coding",
-    "Frontier models from OpenAI, Anthropic, and Google",
-    "Model routing across frontier and open-weight models",
-    "Multi-agent orchestration",
+    "Harness integrado al terminal y al coding agentic",
+    "Modelos frontier de OpenAI, Anthropic y Google",
+    "Ruteo entre modelos frontier y open-weight",
+    "Orquestación multi-agente",
+];
+
+/// Checklist shown on the "Use third party agents" card — how to configure the monitor.
+const THIRD_PARTY_FEATURES: &[&str] = &[
+    "Lanzá Claude, Codex, Grok, Kimi o MiniMax con el menú +",
+    "Árbol en vivo de tareas y subagentes en la barra izquierda",
+    "Proveedores en Ajustes → Agents → Third party CLI agents",
+    "No hace falta Warp AI ni créditos del plan",
 ];
 
 #[derive(Debug, Clone)]
@@ -106,7 +114,7 @@ impl AiSetupSlide {
 
         let title = appearance
             .ui_builder()
-            .paragraph("Choose your AI setup")
+            .paragraph("Elegí tu setup de IA")
             .with_style(UiComponentStyles {
                 font_size: Some(36.),
                 font_weight: Some(Weight::Medium),
@@ -116,7 +124,7 @@ impl AiSetupSlide {
             .finish();
 
         let subtitle = FormattedTextElement::from_str(
-            "Choose if you'd like to use Warp Agent or third party agents.",
+            "Usá el agente de Warp o agentes de terceros (recomendado para el monitor).",
             appearance.ui_font_family(),
             16.,
         )
@@ -227,7 +235,7 @@ impl AiSetupSlide {
         let header_row = {
             let label = appearance
                 .ui_builder()
-                .paragraph("Use Warp Agent")
+                .paragraph("Usar agente de Warp")
                 .with_style(UiComponentStyles {
                     font_size: Some(16.),
                     font_weight: Some(Weight::Semibold),
@@ -241,7 +249,7 @@ impl AiSetupSlide {
                 let green = theme.ansi_fg_green();
                 let badge_text = appearance
                     .ui_builder()
-                    .paragraph("Access more models")
+                    .paragraph("Más modelos")
                     .with_style(UiComponentStyles {
                         font_size: Some(12.),
                         font_weight: Some(Weight::Normal),
@@ -268,7 +276,7 @@ impl AiSetupSlide {
         };
 
         let description = FormattedTextElement::from_str(
-            "State of the art agent harness deeply integrated into the terminal.",
+            "Harness de agentes de punta, integrado al terminal.",
             appearance.ui_font_family(),
             14.,
         )
@@ -354,7 +362,7 @@ impl AiSetupSlide {
 
         let label = appearance
             .ui_builder()
-            .paragraph("Use third party agents")
+            .paragraph("Usar agentes de terceros")
             .with_style(UiComponentStyles {
                 font_size: Some(16.),
                 font_weight: Some(Weight::Semibold),
@@ -365,7 +373,7 @@ impl AiSetupSlide {
             .finish();
 
         let description = FormattedTextElement::from_str(
-            "Use agents like Claude Code, Codex, and Gemini.",
+            "Claude Code, Codex, Grok, Kimi y MiniMax. Cómo se configura el monitor:",
             appearance.ui_font_family(),
             14.,
         )
@@ -375,11 +383,53 @@ impl AiSetupSlide {
         .with_line_height_ratio(1.2)
         .finish();
 
+        let checklist = {
+            let check_fill = if is_selected {
+                Fill::Solid(theme.ansi_fg_green())
+            } else {
+                Fill::Solid(text_color)
+            };
+            let mut col = Flex::column()
+                .with_main_axis_size(MainAxisSize::Min)
+                .with_cross_axis_alignment(CrossAxisAlignment::Start);
+            for &item in THIRD_PARTY_FEATURES {
+                let icon_el = ConstrainedBox::new(Icon::Check.to_warpui_icon(check_fill).finish())
+                    .with_width(16.)
+                    .with_height(16.)
+                    .finish();
+                let text_el = appearance
+                    .ui_builder()
+                    .paragraph(item.to_string())
+                    .with_style(UiComponentStyles {
+                        font_size: Some(14.),
+                        font_weight: Some(Weight::Normal),
+                        font_color: Some(text_color),
+                        ..Default::default()
+                    })
+                    .build()
+                    .finish();
+                let row = Flex::row()
+                    .with_main_axis_size(MainAxisSize::Min)
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .with_child(icon_el)
+                    .with_child(Container::new(text_el).with_margin_left(8.).finish())
+                    .finish();
+                col = col.with_child(
+                    Container::new(row)
+                        .with_padding_top(4.)
+                        .with_padding_bottom(4.)
+                        .finish(),
+                );
+            }
+            col.finish()
+        };
+
         let content = Flex::column()
             .with_main_axis_size(MainAxisSize::Min)
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
             .with_child(label)
             .with_child(Container::new(description).with_margin_top(12.).finish())
+            .with_child(Container::new(checklist).with_margin_top(12.).finish())
             .finish();
 
         Self::render_card_chrome(
@@ -395,7 +445,7 @@ impl AiSetupSlide {
         let back_button = self.back_button.render(
             appearance,
             button::Params {
-                content: button::Content::Label("Back".into()),
+                content: button::Content::Label("Atrás".into()),
                 theme: &button::themes::Naked,
                 options: button::Options {
                     on_click: Some(Box::new(|ctx, _app, _pos| {
@@ -410,7 +460,7 @@ impl AiSetupSlide {
         let next_button = self.next_button.render(
             appearance,
             button::Params {
-                content: button::Content::Label("Next".into()),
+                content: button::Content::Label("Siguiente".into()),
                 theme: &button::themes::Primary,
                 options: button::Options {
                     keystroke: Some(enter),

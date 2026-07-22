@@ -70,3 +70,6 @@ __pycache__/
 # Project notes
 .note/
 .claude/scheduled_tasks.lock
+
+# SDD / agent skill registry (local)
+.atl/

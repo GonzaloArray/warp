@@ -135,7 +135,7 @@ const MISTRAL_ORANGE: ColorU = ColorU {
     a: 255,
 };
 
-/// Represents a CLI agent (e.g., Claude Code, Gemini CLI, Codex, Amp, Droid, OpenCode, Copilot, Pi, Auggie, Cursor, Goose, Hermes, Mistral Vibe)
+/// Represents a CLI agent (e.g., Claude Code, Gemini CLI, Codex, Amp, Droid, OpenCode, Copilot, Pi, Auggie, Cursor, Goose, Hermes, Mistral Vibe, Grok, Kimi, MiniMax)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Sequence, Serialize, Deserialize)]
 pub enum CLIAgent {
     Claude,
@@ -152,6 +152,9 @@ pub enum CLIAgent {
     Hermes,
     Vibe,
     Antigravity,
+    Grok,
+    Kimi,
+    MiniMax,
     /// Represents an unknown/custom CLI agent matched by user-configured regex patterns.
     Unknown,
 }
@@ -174,7 +177,34 @@ impl CLIAgent {
             CLIAgent::Hermes => "hermes",
             CLIAgent::Vibe => "vibe",
             CLIAgent::Antigravity => "agy",
+            CLIAgent::Grok => "grok",
+            CLIAgent::Kimi => "kimi",
+            CLIAgent::MiniMax => "minimax",
             CLIAgent::Unknown => "",
+        }
+    }
+
+    /// Command tokens accepted as this agent (aligned with hub `detect_commands` for named leaves).
+    pub fn detection_tokens(&self) -> &'static [&'static str] {
+        match self {
+            CLIAgent::Grok => &["grok", "xai"],
+            CLIAgent::Kimi => &["kimi", "moonshot"],
+            CLIAgent::MiniMax => &["minimax", "mini-max"],
+            CLIAgent::Vibe => &["vibe", "vibe-acp"],
+            CLIAgent::Claude => &["claude"],
+            CLIAgent::Gemini => &["gemini"],
+            CLIAgent::Codex => &["codex"],
+            CLIAgent::Amp => &["amp"],
+            CLIAgent::Droid => &["droid"],
+            CLIAgent::OpenCode => &["opencode"],
+            CLIAgent::Copilot => &["copilot"],
+            CLIAgent::Pi => &["pi"],
+            CLIAgent::Auggie => &["auggie"],
+            CLIAgent::CursorCli => &["agent"],
+            CLIAgent::Goose => &["goose"],
+            CLIAgent::Hermes => &["hermes"],
+            CLIAgent::Antigravity => &["agy"],
+            CLIAgent::Unknown => &[],
         }
     }
 
@@ -222,6 +252,9 @@ impl CLIAgent {
             CLIAgent::Hermes => "Hermes",
             CLIAgent::Vibe => "Mistral Vibe",
             CLIAgent::Antigravity => "Antigravity",
+            CLIAgent::Grok => "Grok",
+            CLIAgent::Kimi => "Kimi",
+            CLIAgent::MiniMax => "MiniMax",
             CLIAgent::Unknown => "CLI Agent",
         }
     }
@@ -246,6 +279,7 @@ impl CLIAgent {
             // up in a follow-up once an officially licensed SVG is available.
             CLIAgent::Vibe => None,
             CLIAgent::Antigravity => Some(Icon::AntigravityLogo),
+            CLIAgent::Grok | CLIAgent::Kimi | CLIAgent::MiniMax => None,
             CLIAgent::Unknown => None,
         }
     }
@@ -277,6 +311,7 @@ impl CLIAgent {
             CLIAgent::Hermes => &[SkillProvider::Agents],
             CLIAgent::Vibe => &[SkillProvider::Agents],
             CLIAgent::Antigravity => &[],
+            CLIAgent::Grok | CLIAgent::Kimi | CLIAgent::MiniMax => &[],
             CLIAgent::Unknown => &[],
         }
     }
@@ -320,6 +355,7 @@ impl CLIAgent {
             CLIAgent::Hermes => Some(HERMES_PURPLE),
             CLIAgent::Vibe => Some(MISTRAL_ORANGE),
             CLIAgent::Antigravity => Some(ANTIGRAVITY_COLOR),
+            CLIAgent::Grok | CLIAgent::Kimi | CLIAgent::MiniMax => None,
             CLIAgent::Unknown => None,
         }
     }
@@ -382,16 +418,17 @@ impl CLIAgent {
 
         let resolved_first_word = Self::extract_first_command(&resolved_command, escape_char)?;
 
-        // Check if resolved command matches any known CLI agent.
-        // Also matches `aifx agent run claude` as Claude for Uber employees,
-        // and the `vibe-acp` ACP-mode binary as Mistral Vibe.
+        // Match against detection_tokens (includes hub-aligned aliases such as
+        // xai/moonshot/mini-max and vibe-acp). Keep the Uber aifx special-case.
         enum_iterator::all::<CLIAgent>()
             .filter(|agent| !matches!(agent, CLIAgent::Unknown))
             .find(|agent| {
-                resolved_first_word == agent.command_prefix()
+                agent
+                    .detection_tokens()
+                    .iter()
+                    .any(|token| *token == resolved_first_word)
                     || (matches!(agent, CLIAgent::Claude)
                         && Self::is_aifx_agent_run_claude(&resolved_command, ctx))
-                    || (matches!(agent, CLIAgent::Vibe) && resolved_first_word == "vibe-acp")
             })
     }
 
@@ -607,6 +644,9 @@ impl From<CLIAgent> for CLIAgentType {
             CLIAgent::Hermes => CLIAgentType::Hermes,
             CLIAgent::Vibe => CLIAgentType::Vibe,
             CLIAgent::Antigravity => CLIAgentType::Antigravity,
+            CLIAgent::Grok => CLIAgentType::Grok,
+            CLIAgent::Kimi => CLIAgentType::Kimi,
+            CLIAgent::MiniMax => CLIAgentType::MiniMax,
             CLIAgent::Unknown => CLIAgentType::Unknown,
         }
     }

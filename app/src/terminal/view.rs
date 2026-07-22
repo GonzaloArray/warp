@@ -51,6 +51,7 @@ mod testing;
 mod tooltips;
 pub mod use_agent_footer;
 mod zero_state_block;
+pub(crate) mod codex_shell;
 
 use std::any::Any;
 use std::borrow::Cow;
@@ -2809,6 +2810,8 @@ pub struct TerminalView {
 
     cli_subagent_views: HashMap<BlockId, ViewHandle<CLISubagentView>>,
     cli_subagent_controller: ModelHandle<CLISubagentController>,
+    /// In-session Codex two-column subagent shell (not the global sidebar).
+    codex_shell: std::cell::RefCell<crate::workspace::codex_session_shell::CodexSessionShellState>,
     use_agent_footer: ViewHandle<UseAgentToolbar>,
 
     agent_view_controller: ModelHandle<AgentViewController>,
@@ -4371,6 +4374,9 @@ impl TerminalView {
             ignore_next_set_title_event: false,
             cli_subagent_views: Default::default(),
             cli_subagent_controller,
+            codex_shell: std::cell::RefCell::new(
+                crate::workspace::codex_session_shell::CodexSessionShellState::new(),
+            ),
             use_agent_footer: use_agent_button_bar,
             agent_view_controller,
             agent_view_back_button,
@@ -27960,7 +27966,7 @@ impl View for TerminalView {
             && self.is_conversation_details_panel_open
             && self.can_show_conversation_details_ui_from_model(&model, app);
 
-        if should_show_panel {
+        let with_details = if should_show_panel {
             Container::new(
                 Flex::row()
                     .with_main_axis_size(warpui::elements::MainAxisSize::Max)
@@ -27973,7 +27979,10 @@ impl View for TerminalView {
             .finish()
         } else {
             final_element
-        }
+        };
+
+        // Codex subagents: two-column shell inside this session tab only.
+        self.maybe_wrap_codex_session_shell(with_details, app)
     }
 
     fn on_focus(&mut self, focus_ctx: &FocusContext, ctx: &mut ViewContext<Self>) {

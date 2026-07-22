@@ -249,6 +249,8 @@ impl MenuItemLabel {
             Self::Text(label) => Some(label),
             Self::MultilineText { label, .. } => Some(label),
             Self::StackedText { primary_text, .. } => Some(primary_text),
+            // Primary line is the stable identity for menus (CLI · Nueva sesión, etc.).
+            Self::LabeledText { primary_text, .. } => Some(primary_text),
             Self::Custom { label, .. } => label.as_deref(),
             _ => None,
         }

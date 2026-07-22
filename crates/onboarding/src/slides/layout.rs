@@ -277,104 +277,41 @@ impl Element for CenterFractionTopWrapper {
     }
 }
 
-/// Wraps a slide's foreground visual with the shared onboarding background image.
+/// Right column (col 2) of onboarding: Sumanos brand art fills this panel only.
 ///
-/// For `TopMode::Ratio`: uses a `Flex::column` with a proportional `Expanded` top spacer.
-/// For `TopMode::CenterFraction`: uses `CenterFractionTopWrapper` which computes the
-/// top offset dynamically at layout time based on the actual panel dimensions.
+/// Left column keeps form copy; sidebar / full-window workspace are untouched.
+/// `path` / `layout` stay in the signature for call-site compatibility but the
+/// brand photo is the visible col-2 content (product mockups used to cover it).
 pub fn onboarding_right_panel_with_bg(
-    path: &'static str,
-    layout: ForegroundLayout,
+    _path: &'static str,
+    _layout: ForegroundLayout,
 ) -> Box<dyn Element> {
-    let background = Image::new(
-        AssetSource::Bundled {
-            path: ONBOARDING_BG_PATH,
-        },
-        CacheOption::Original,
-    )
-    .stretch()
-    .finish();
+    // Prefer LocalFile in debug so the source-tree PNG always resolves.
+    let source = {
+        let local = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../app/assets/async/png/onboarding/onboarding_bg.png");
+        if local.is_file() {
+            AssetSource::LocalFile {
+                path: local.to_string_lossy().into_owned(),
+                content_version: None,
+            }
+        } else {
+            AssetSource::Bundled {
+                path: ONBOARDING_BG_PATH,
+            }
+        }
+    };
 
-    let image = match layout.fit {
-        ForegroundFit::CoverTopAligned => {
-            Image::new(AssetSource::Bundled { path }, CacheOption::Original)
+    // Full opacity (1.0) so the brand art is solid in col 2 — no scrim/wash.
+    Clipped::new(
+        Shrinkable::new(
+            1.,
+            Image::new(source, CacheOption::Original)
                 .cover()
-                .top_aligned()
-                .finish()
-        }
-        ForegroundFit::ContainTopAligned => {
-            Image::new(AssetSource::Bundled { path }, CacheOption::Original)
-                .contain()
-                .top_aligned()
-                .finish()
-        }
-        ForegroundFit::ContainRightAligned => {
-            Image::new(AssetSource::Bundled { path }, CacheOption::Original)
-                .contain()
-                .right_aligned()
-                .finish()
-        }
-    };
-
-    // Apply horizontal padding: fixed pixels (DEFAULT) or proportional to panel width.
-    let image_slot: Box<dyn Element> = match layout.h_padding {
-        HPadding::Fixed(px) => Container::new(image)
-            .with_padding_left(px)
-            .with_padding_right(px)
-            .finish(),
-        HPadding::ProportionalBoth(ratio) => Flex::row()
-            .with_main_axis_size(MainAxisSize::Max)
-            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_child(Box::new(Expanded::new(ratio, Box::new(Empty::new()))))
-            .with_child(Box::new(Expanded::new(1. - 2. * ratio, image)))
-            .with_child(Box::new(Expanded::new(ratio, Box::new(Empty::new()))))
-            .finish(),
-        HPadding::ProportionalLeft(ratio) => Flex::row()
-            .with_main_axis_size(MainAxisSize::Max)
-            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_child(Box::new(Expanded::new(ratio, Box::new(Empty::new()))))
-            .with_child(Box::new(Expanded::new(1. - ratio, image)))
-            .finish(),
-        HPadding::ProportionalRight { ratio, left_offset } => {
-            let adjusted = if left_offset != 0. {
-                Container::new(image)
-                    .with_padding_left(left_offset)
-                    .finish()
-            } else {
-                image
-            };
-            Flex::row()
-                .with_main_axis_size(MainAxisSize::Max)
-                .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-                .with_child(Box::new(Expanded::new(1. - ratio, adjusted)))
-                .with_child(Box::new(Expanded::new(ratio, Box::new(Empty::new()))))
-                .finish()
-        }
-    };
-
-    // Build the foreground with either a fixed or dynamic top offset.
-    let foreground: Box<dyn Element> = match layout.top_mode {
-        TopMode::Ratio(ratio) => {
-            let remaining = 1. - ratio;
-            Flex::column()
-                .with_main_axis_size(MainAxisSize::Max)
-                .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-                .with_child(Box::new(Expanded::new(ratio, Box::new(Empty::new()))))
-                .with_child(Box::new(Expanded::new(remaining, image_slot)))
-                .finish()
-        }
-        TopMode::CenterFraction {
-            h_ratio,
-            inv_aspect,
-            frac,
-        } => Box::new(CenterFractionTopWrapper::new(
-            h_ratio, inv_aspect, frac, image_slot,
-        )),
-    };
-
-    let mut stack = Stack::new();
-    stack.extend(Some(background));
-    stack.extend(Some(foreground));
-
-    Clipped::new(stack.finish()).finish()
+                .with_opacity(1.)
+                .finish(),
+        )
+        .finish(),
+    )
+    .finish()
 }

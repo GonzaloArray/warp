@@ -6,14 +6,17 @@ use warpui::EntityId;
 use warpui::elements::PositionedElementOffsetBounds;
 
 use super::{
-    AGENT_MONITOR_EMPTY_STATE_MESSAGE, AGENT_MONITOR_EMPTY_STATE_TITLE, AgentMonitorKeyboardAction,
-    AgentMonitorPanelState, AgentTabTextPreference, SummaryPaneKind, SummaryPaneKindIcons,
-    TerminalAgentText, TerminalPrimaryLineData, TerminalPrimaryLineFont, VerticalTabsDetailTarget,
-    VerticalTabsDetailTargetKind, VerticalTabsSummaryBranchEntry, VerticalTabsSummaryData,
-    VerticalTabsSummaryPrimaryLabel, agent_monitor_control_label, agent_monitor_customize_action,
-    agent_monitor_display_name, agent_monitor_keyboard_action, agent_monitor_keyboard_node_id,
-    agent_monitor_summary, branch_label_display, coalesce_summary_branch_entries,
-    code_detail_kind_label, compact_branch_subtitle_display, detail_sidecar_width_and_bounds,
+    AGENT_MONITOR_EMPTY_STATE_MESSAGE, AGENT_MONITOR_EMPTY_STATE_TITLE,
+    AgentMonitorFocusStep, AgentMonitorKeyboardAction, AgentMonitorPanelState,
+    AgentMonitorToggleExpandEffect, AgentTabTextPreference, SummaryPaneKind,
+    SummaryPaneKindIcons, TerminalAgentText, TerminalPrimaryLineData, TerminalPrimaryLineFont,
+    VerticalTabsDetailTarget, VerticalTabsDetailTargetKind, VerticalTabsSummaryBranchEntry,
+    VerticalTabsSummaryData, VerticalTabsSummaryPrimaryLabel, agent_monitor_adjacent_visible_node,
+    agent_monitor_control_label, agent_monitor_customize_action, agent_monitor_display_name,
+    agent_monitor_keyboard_action, agent_monitor_keyboard_node_id, agent_monitor_summary,
+    agent_monitor_toggle_expand_effect,
+    branch_label_display, coalesce_summary_branch_entries, code_detail_kind_label,
+    compact_branch_subtitle_display, detail_sidecar_width_and_bounds,
     detail_target_for_hovered_row, non_terminal_search_text_fragments,
     pane_ids_for_display_granularity, pane_search_text_fragments, preferred_agent_tab_titles,
     push_normalized_unique_summary_label, search_fragments_contain_query,
@@ -86,6 +89,12 @@ fn monitor_node(
             "Architecture".to_string()
         },
         profile_key: Some(id.as_key()),
+        ops_primary: None,
+        ops_secondary: None,
+        needs_attention: false,
+        task_summary: None,
+        activity: None,
+        last_event_ms: None,
     }
 }
 
@@ -157,7 +166,12 @@ fn agent_monitor_keyboard_contract_keeps_activation_and_disclosure_separate() {
         agent_monitor_keyboard_action("enter"),
         Some(AgentMonitorKeyboardAction::Activate)
     );
+    // Space toggles expand/collapse only — never activates the focused row.
     assert_eq!(
+        agent_monitor_keyboard_action("space"),
+        Some(AgentMonitorKeyboardAction::ToggleExpand)
+    );
+    assert_ne!(
         agent_monitor_keyboard_action("space"),
         Some(AgentMonitorKeyboardAction::Activate)
     );
@@ -169,7 +183,123 @@ fn agent_monitor_keyboard_contract_keeps_activation_and_disclosure_separate() {
         agent_monitor_keyboard_action("left"),
         Some(AgentMonitorKeyboardAction::Collapse)
     );
+    assert_eq!(
+        agent_monitor_keyboard_action("up"),
+        Some(AgentMonitorKeyboardAction::MoveUp)
+    );
+    assert_eq!(
+        agent_monitor_keyboard_action("down"),
+        Some(AgentMonitorKeyboardAction::MoveDown)
+    );
     assert_eq!(agent_monitor_keyboard_action("escape"), None);
+}
+
+#[test]
+fn agent_monitor_keyboard_space_on_leaf_consumes_without_activating() {
+    // Action layer: Space always maps to ToggleExpand, never Activate.
+    let space = agent_monitor_keyboard_action("space");
+    assert_eq!(space, Some(AgentMonitorKeyboardAction::ToggleExpand));
+    assert_ne!(space, Some(AgentMonitorKeyboardAction::Activate));
+    assert_eq!(
+        agent_monitor_keyboard_action("enter"),
+        Some(AgentMonitorKeyboardAction::Activate),
+        "only Enter activates; Space must stay disclosure-only"
+    );
+
+    // Leaf (has_children=false): StopPropagation semantics with no expand side effect.
+    assert_eq!(
+        agent_monitor_toggle_expand_effect(false, false),
+        AgentMonitorToggleExpandEffect::ConsumeWithoutSideEffect,
+        "Space on a leaf must not activate and must not expand"
+    );
+    assert_eq!(
+        agent_monitor_toggle_expand_effect(false, true),
+        AgentMonitorToggleExpandEffect::ConsumeWithoutSideEffect,
+        "expanded flag is irrelevant for leaves"
+    );
+
+    // Parent contrast: Space still toggles, never activates.
+    assert_eq!(
+        agent_monitor_toggle_expand_effect(true, false),
+        AgentMonitorToggleExpandEffect::Toggle { expanded: true }
+    );
+    assert_eq!(
+        agent_monitor_toggle_expand_effect(true, true),
+        AgentMonitorToggleExpandEffect::Toggle { expanded: false }
+    );
+}
+
+#[test]
+fn agent_monitor_keyboard_focus_walks_visible_rows_only_without_wrapping() {
+    let root = MonitorNodeId::Oz(monitor_id(1));
+    let child = MonitorNodeId::Oz(monitor_id(2));
+    let other_root = MonitorNodeId::Oz(monitor_id(3));
+    // Visible set is what the walker sees — collapsed children are omitted upstream.
+    let visible = vec![root.clone(), child.clone(), other_root.clone()];
+
+    assert_eq!(
+        agent_monitor_adjacent_visible_node(
+            &visible,
+            Some(&root),
+            AgentMonitorFocusStep::Down
+        ),
+        Some(child.clone())
+    );
+    assert_eq!(
+        agent_monitor_adjacent_visible_node(
+            &visible,
+            Some(&child),
+            AgentMonitorFocusStep::Down
+        ),
+        Some(other_root.clone())
+    );
+    // No wrap at the ends.
+    assert_eq!(
+        agent_monitor_adjacent_visible_node(
+            &visible,
+            Some(&other_root),
+            AgentMonitorFocusStep::Down
+        ),
+        None
+    );
+    assert_eq!(
+        agent_monitor_adjacent_visible_node(
+            &visible,
+            Some(&root),
+            AgentMonitorFocusStep::Up
+        ),
+        None
+    );
+    assert_eq!(
+        agent_monitor_adjacent_visible_node(
+            &visible,
+            Some(&child),
+            AgentMonitorFocusStep::Up
+        ),
+        Some(root.clone())
+    );
+}
+
+#[test]
+fn agent_monitor_keyboard_focus_skips_collapsed_descendants_via_visible_list() {
+    let root = MonitorNodeId::Oz(monitor_id(1));
+    let hidden_child = MonitorNodeId::Oz(monitor_id(2));
+    let next_root = MonitorNodeId::Oz(monitor_id(3));
+    // Collapsed parent means the child is not in the visible list.
+    let visible = vec![root.clone(), next_root.clone()];
+
+    assert_eq!(
+        agent_monitor_adjacent_visible_node(
+            &visible,
+            Some(&root),
+            AgentMonitorFocusStep::Down
+        ),
+        Some(next_root)
+    );
+    assert!(
+        !visible.contains(&hidden_child),
+        "collapsed descendants must not appear in the visible walk set"
+    );
 }
 
 #[test]
@@ -185,7 +315,7 @@ fn agent_monitor_collapsed_root_summary_keeps_status_and_task_count() {
 
     assert_eq!(
         agent_monitor_summary(&projection.nodes[0], &projection),
-        "working · 2 subagents · 2 active"
+        "working · 2 subagents · 2 trabajando"
     );
 }
 
@@ -199,10 +329,20 @@ fn agent_monitor_control_labels_describe_select_and_disclosure_separately() {
         ],
     };
     let node = &projection.nodes[0];
+    let row_label = agent_monitor_control_label(node, &projection, false, false);
 
-    assert_eq!(
-        agent_monitor_control_label(node, &projection, false, false),
-        "Agent tab: Select Gateway monitor, working · 1 subagent · 1 active. Press Enter or Space to open; Right Arrow expands and Left Arrow collapses"
+    assert!(
+        row_label.contains("Press Enter to open"),
+        "row a11y must describe Enter as open/activate: {row_label}"
+    );
+    assert!(
+        row_label.contains("Space")
+            && (row_label.contains("expand") || row_label.contains("Expand")),
+        "row a11y must describe Space as expand/collapse: {row_label}"
+    );
+    assert!(
+        !row_label.contains("Space to open"),
+        "Space must not be described as open: {row_label}"
     );
     assert_eq!(
         agent_monitor_control_label(node, &projection, false, true),
@@ -225,9 +365,56 @@ fn agent_monitor_keyboard_has_a_root_target_before_a_terminal_is_active() {
     };
 
     assert_eq!(
-        agent_monitor_keyboard_node_id(None, &projection),
+        agent_monitor_keyboard_node_id(None, None, &projection),
         Some(MonitorNodeId::Oz(root))
     );
+}
+
+#[test]
+fn agent_monitor_keyboard_focus_prefers_roving_focus_over_active_selection() {
+    let root = MonitorNodeId::Oz(monitor_id(1));
+    let task = MonitorNodeId::Oz(monitor_id(2));
+    let projection = AgentTabsProjection {
+        nodes: vec![
+            monitor_node(monitor_id(1), None, 0, true),
+            monitor_node(monitor_id(2), Some(monitor_id(1)), 1, false),
+        ],
+    };
+
+    assert_eq!(
+        agent_monitor_keyboard_node_id(Some(task.clone()), Some(root.clone()), &projection),
+        Some(task)
+    );
+    assert_eq!(
+        agent_monitor_keyboard_node_id(None, Some(root.clone()), &projection),
+        Some(root)
+    );
+}
+
+#[test]
+fn agent_monitor_reconcile_prunes_keyboard_focus_without_overwriting_from_active() {
+    let root = MonitorNodeId::Oz(monitor_id(1));
+    let stale = MonitorNodeId::Oz(monitor_id(99));
+    let projection = AgentTabsProjection {
+        nodes: vec![monitor_node(monitor_id(1), None, 0, false)],
+    };
+    let mut state = AgentMonitorPanelState {
+        keyboard_focus_node_id: Some(stale),
+        ..Default::default()
+    };
+
+    state.reconcile(&projection, Some(root.clone()));
+    assert_eq!(
+        state.keyboard_focus_node_id, None,
+        "stale keyboard focus must be pruned"
+    );
+    assert_eq!(state.selected_node_id, Some(root.clone()));
+
+    state.keyboard_focus_node_id = Some(root.clone());
+    // Active selection changes must not clobber an explicit keyboard focus.
+    state.reconcile(&projection, None);
+    assert_eq!(state.keyboard_focus_node_id, Some(root));
+    assert_eq!(state.selected_node_id, None);
 }
 
 #[test]
@@ -242,10 +429,10 @@ fn agent_monitor_empty_state_identifies_the_agents_section_without_sample_data()
     let projection = AgentTabsProjection::default();
 
     assert!(projection.nodes.is_empty());
-    assert_eq!(AGENT_MONITOR_EMPTY_STATE_TITLE, "Agents");
+    assert_eq!(AGENT_MONITOR_EMPTY_STATE_TITLE, "Tus agentes");
     assert_eq!(
         AGENT_MONITOR_EMPTY_STATE_MESSAGE,
-        "Use + to Launch Claude, Codex, Grok… Active sessions appear here."
+        "Usá + para lanzar Codex, Claude, Grok… Las sesiones CLI y sus subagents aparecen acá y en el shell de la sesión."
     );
 }
 
@@ -259,11 +446,35 @@ fn agent_monitor_profile_name_overrides_native_projection_label() {
     assert_eq!(agent_monitor_display_name(None, &node), "Gateway monitor");
 }
 
+fn project_monitor_node(project_id: &str, profile_key: &str, display_label: &str) -> AgentTabNode {
+    AgentTabNode {
+        id: MonitorNodeId::Project(project_id.to_string()),
+        parent_id: None,
+        depth: 0,
+        kind: AgentTabKind::AgentRoot,
+        availability: AgentHierarchyAvailability::Available,
+        status: AgentTabStatus::Waiting,
+        has_children: true,
+        descendants: AgentHierarchyCounts::default(),
+        external_provider: None,
+        display_label: display_label.to_string(),
+        profile_key: Some(profile_key.to_string()),
+        ops_primary: None,
+        ops_secondary: None,
+        needs_attention: false,
+        task_summary: None,
+        activity: None,
+        last_event_ms: None,
+    }
+}
+
 #[test]
 fn agent_monitor_customize_action_uses_the_trusted_profile_identity_not_the_title() {
-    let id = monitor_id(7);
-    let mut node = monitor_node(id, None, 0, false);
-    node.display_label = "A title must not become an identity".to_string();
+    let mut node = project_monitor_node(
+        "proj-7",
+        "profile-7",
+        "A title must not become an identity",
+    );
 
     assert!(matches!(
         agent_monitor_customize_action(&node),
@@ -271,25 +482,37 @@ fn agent_monitor_customize_action_uses_the_trusted_profile_identity_not_the_titl
             provider,
             agent_key,
             fallback_name,
-        }) if provider == "oz" && agent_key == id.as_key()
+        }) if provider == "project" && agent_key == "profile-7"
             && fallback_name == "A title must not become an identity"
+    ));
+
+    // Display title changes must not change the profile key used for edit.
+    node.display_label = "Different title".to_string();
+    assert!(matches!(
+        agent_monitor_customize_action(&node),
+        Some(WorkspaceAction::OpenAgentMonitorProfileEditor {
+            agent_key,
+            ..
+        }) if agent_key == "profile-7"
     ));
 }
 
 #[test]
 fn agent_monitor_customize_action_requires_a_profile_key() {
-    let id = monitor_id(8);
-    let mut node = monitor_node(id, None, 0, false);
+    let mut node = project_monitor_node("proj-8", "profile-8", "Gateway");
     node.profile_key = None;
 
     assert!(agent_monitor_customize_action(&node).is_none());
 }
 
 #[test]
-fn agent_monitor_customize_action_is_available_without_a_feature_flag_override() {
-    let node = monitor_node(monitor_id(9), None, 0, false);
+fn agent_monitor_customize_action_is_available_only_for_project_roots() {
+    let project = project_monitor_node("proj-9", "profile-9", "My agent");
+    assert!(agent_monitor_customize_action(&project).is_some());
 
-    assert!(agent_monitor_customize_action(&node).is_some());
+    // Oz / external leaves are not accordion roots — no profile editor.
+    let oz = monitor_node(monitor_id(9), None, 0, false);
+    assert!(agent_monitor_customize_action(&oz).is_none());
 }
 fn code_summary_kind(title: &str) -> SummaryPaneKind {
     SummaryPaneKind::Code {

@@ -177,9 +177,28 @@ pub enum WorkspaceAction {
         agent_key: String,
         fallback_name: String,
     },
+    /// Closes the agent-monitor profile editor without saving.
+    CancelAgentMonitorProfileEditor,
+    /// Creates a user AgentProject (accordion root) in the agents rail.
+    CreateAgentProject {
+        display_name: String,
+    },
+    /// Adds a task section under an existing AgentProject accordion.
+    AddAgentProjectTask {
+        project_id: String,
+        title: String,
+    },
+    /// Adds a worker slot under a task (provider name e.g. `claude`).
+    /// Terminal attachment is optional until the CLI is launched.
+    AddAgentProjectWorker {
+        project_id: String,
+        task_id: String,
+        provider: String,
+    },
     /// Opens a new terminal and launches the selected external agent CLI.
     LaunchAgentProvider {
         provider: crate::workspace::agent_provider_hub::AgentProviderId,
+        mode: crate::workspace::agent_provider_hub::AgentProviderLaunchMode,
     },
     /// Enables or disables a provider in the monitor hub preference list.
     SetAgentProviderEnabled {
@@ -503,6 +522,97 @@ pub enum WorkspaceAction {
         node_id: MonitorNodeId,
         expanded: bool,
         accessibility_label: String,
+    },
+    /// Select a CLI subagent (or clear with ProjectAction-less None path) in the
+    /// hierarchical monitor under a session tab. Opens detail + breadcrumb.
+    SelectAgentMonitorNode {
+        node_id: MonitorNodeId,
+    },
+    /// Clear subagent selection (back to parent agent session).
+    ClearAgentMonitorSelection,
+    /// Codex in-session shell: show parent agent in column 2.
+    CodexShellSelectParent {
+        terminal_view_id: EntityId,
+    },
+    /// Codex in-session shell: select an active subagent for column 2.
+    CodexShellSelectSubagent {
+        terminal_view_id: EntityId,
+        child_key: String,
+    },
+    /// Codex in-session shell: close/hide column 2 without removing the subagent.
+    CodexShellCloseView {
+        terminal_view_id: EntityId,
+    },
+    /// Codex in-session shell: toggle finished-subagent history list.
+    CodexShellToggleHistory {
+        terminal_view_id: EntityId,
+    },
+    /// Codex in-session shell: open a history entry in column 2.
+    CodexShellSelectHistory {
+        terminal_view_id: EntityId,
+        child_key: String,
+    },
+    /// Codex in-session shell: remove a subagent from the active nav list (UI only).
+    CodexShellRemoveFromList {
+        terminal_view_id: EntityId,
+        child_key: String,
+    },
+    /// Codex in-session shell: request stop for a still-running subagent (UI override).
+    CodexShellStop {
+        terminal_view_id: EntityId,
+        child_key: String,
+    },
+    /// Delete one finished history entry (requires confirmation on first click).
+    CodexShellDeleteHistory {
+        terminal_view_id: EntityId,
+        history_id: String,
+    },
+    /// Clear all finished history for this parent session.
+    CodexShellClearHistory {
+        terminal_view_id: EntityId,
+    },
+    /// Expand/collapse technical details in the detail panel.
+    CodexShellToggleTechnicalDetails {
+        terminal_view_id: EntityId,
+    },
+    CodexShellToggleHistoryMultiSelect {
+        terminal_view_id: EntityId,
+    },
+    CodexShellToggleHistoryIdSelected {
+        terminal_view_id: EntityId,
+        history_id: String,
+    },
+    CodexShellDeleteSelectedHistory {
+        terminal_view_id: EntityId,
+    },
+    CodexShellCycleHistorySort {
+        terminal_view_id: EntityId,
+    },
+    CodexShellToggleHistoryErrorsFilter {
+        terminal_view_id: EntityId,
+    },
+    CodexShellToggleHistoryFilesFilter {
+        terminal_view_id: EntityId,
+    },
+    CodexShellToggleTimelineGroup {
+        terminal_view_id: EntityId,
+        group_key: String,
+    },
+    CodexShellSelectAllVisibleHistory {
+        terminal_view_id: EntityId,
+        /// Only ids currently visible under active filters (never hidden rows).
+        ids: Vec<String>,
+    },
+    CodexShellSetHistoryQuery {
+        terminal_view_id: EntityId,
+        query: String,
+    },
+    CodexShellToggleHistoryTodayFilter {
+        terminal_view_id: EntityId,
+    },
+    /// Retry archiving pending-completed children (after disk recovery).
+    CodexShellRetryPendingArchives {
+        terminal_view_id: EntityId,
     },
     /// An action to view a newly created/edited workflow in WD from the toast
     ViewObjectInWarpDrive(WarpDriveItemId),
@@ -1155,6 +1265,29 @@ impl WorkspaceAction {
             | FocusRightPanel
             | FocusAgentMonitor
             | SetAgentMonitorExpanded { .. }
+            | SelectAgentMonitorNode { .. }
+            | ClearAgentMonitorSelection
+            | CodexShellSelectParent { .. }
+            | CodexShellSelectSubagent { .. }
+            | CodexShellCloseView { .. }
+            | CodexShellToggleHistory { .. }
+            | CodexShellSelectHistory { .. }
+            | CodexShellRemoveFromList { .. }
+            | CodexShellStop { .. }
+            | CodexShellDeleteHistory { .. }
+            | CodexShellClearHistory { .. }
+            | CodexShellToggleTechnicalDetails { .. }
+            | CodexShellToggleHistoryMultiSelect { .. }
+            | CodexShellToggleHistoryIdSelected { .. }
+            | CodexShellDeleteSelectedHistory { .. }
+            | CodexShellCycleHistorySort { .. }
+            | CodexShellToggleHistoryErrorsFilter { .. }
+            | CodexShellToggleHistoryFilesFilter { .. }
+            | CodexShellToggleTimelineGroup { .. }
+            | CodexShellSelectAllVisibleHistory { .. }
+            | CodexShellSetHistoryQuery { .. }
+            | CodexShellToggleHistoryTodayFilter { .. }
+            | CodexShellRetryPendingArchives { .. }
             | DumpDebugInfo
             | LogReviewCommentSendStatusForActiveTab
             | ToggleRecordingMode
@@ -1263,6 +1396,10 @@ impl WorkspaceAction {
             FileDeleted { .. } => false, // File deletion doesn't change workspace state
             OpenEnvironmentManagementPane
             | OpenAgentMonitorProfileEditor { .. }
+            | CancelAgentMonitorProfileEditor
+            | CreateAgentProject { .. }
+            | AddAgentProjectTask { .. }
+            | AddAgentProjectWorker { .. }
             | LaunchAgentProvider { .. }
             | SetAgentProviderEnabled { .. } => false,
             #[cfg(target_os = "linux")]

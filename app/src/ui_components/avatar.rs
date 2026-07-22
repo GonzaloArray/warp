@@ -24,6 +24,12 @@ pub enum AvatarContent {
         /// The first initial is rendered prior to loading the image.
         display_name: String,
     },
+
+    /// Local filesystem image (PNG/JPEG) for user-custom agent avatars.
+    LocalImage {
+        path: String,
+        display_name: String,
+    },
 }
 
 #[derive(Clone)]
@@ -54,6 +60,24 @@ impl UiComponent for Avatar {
                     .before_load(
                         Align::new(Self::first_initial(&display_name, self.styles)).finish(),
                     );
+                if let Some(radius) = styles.border_radius {
+                    image = image.with_corner_radius(radius);
+                }
+                image.finish()
+            }
+            AvatarContent::LocalImage { path, display_name } => {
+                use warpui::assets::asset_cache::{AssetSource, LocalFileContentVersion};
+                let content_version = LocalFileContentVersion::for_path(&path);
+                let mut image = Image::new(
+                    AssetSource::LocalFile {
+                        path: path.clone(),
+                        content_version,
+                    },
+                    CacheOption::BySize,
+                )
+                .before_load(
+                    Align::new(Self::first_initial(&display_name, self.styles)).finish(),
+                );
                 if let Some(radius) = styles.border_radius {
                     image = image.with_corner_radius(radius);
                 }

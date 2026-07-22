@@ -411,8 +411,7 @@ impl OnboardingCalloutModel {
             UniversalInputCalloutState::TalkToAgent
             | UniversalInputCalloutState::Complete(FinalState::Submit) => {
                 OnboardingQuery::AgentPrompt(
-                    "What tests exist in this repo, how are they structured, and what do they cover?"
-                        .to_string(),
+                    "¿Qué tests hay en este repo, cómo se estructuran y qué cubren?".to_string(),
                 )
             }
             UniversalInputCalloutState::Complete(_) => OnboardingQuery::None,
@@ -423,13 +422,15 @@ impl OnboardingCalloutModel {
         match state {
             AgentModalityCalloutState::Off => OnboardingQuery::None,
             AgentModalityCalloutState::TerminalMode => {
-                OnboardingQuery::TerminalCommand("Run a command...".to_string())
+                OnboardingQuery::TerminalCommand("Ejecutá un comando...".to_string())
             }
             AgentModalityCalloutState::AgentMode => {
                 if self.has_project {
                     OnboardingQuery::AgentPrompt("/init".to_string())
                 } else {
-                    OnboardingQuery::AgentPrompt("Tell the agent what to build...".to_string())
+                    OnboardingQuery::AgentPrompt(
+                        "Decile al agente qué construir...".to_string(),
+                    )
                 }
             }
             // All completion states should return None so the input gets cleared

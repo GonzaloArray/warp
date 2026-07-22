@@ -265,6 +265,9 @@ fn test_detect_known_agents() {
                 ("goose", CLIAgent::Goose),
                 ("vibe", CLIAgent::Vibe),
                 ("agy", CLIAgent::Antigravity),
+                ("grok", CLIAgent::Grok),
+                ("kimi", CLIAgent::Kimi),
+                ("minimax", CLIAgent::MiniMax),
             ] {
                 assert_eq!(
                     CLIAgent::detect(command, None, None, ctx),
@@ -274,6 +277,85 @@ fn test_detect_known_agents() {
             }
         });
     });
+}
+
+#[test]
+fn test_detect_grok_kimi_minimax_hub_aliases() {
+    // Detection tokens must stay aligned with AgentProviderId::detect_commands.
+    App::test((), |mut app| async move {
+        app.update(|ctx| {
+            for (command, expected) in [
+                ("grok", CLIAgent::Grok),
+                ("xai", CLIAgent::Grok),
+                ("kimi", CLIAgent::Kimi),
+                ("moonshot", CLIAgent::Kimi),
+                ("minimax", CLIAgent::MiniMax),
+                ("mini-max", CLIAgent::MiniMax),
+            ] {
+                assert_eq!(
+                    CLIAgent::detect(command, None, None, ctx),
+                    Some(expected),
+                    "failed to detect hub alias {command}",
+                );
+            }
+        });
+    });
+}
+
+#[test]
+fn test_detect_grok_kimi_minimax_with_flags() {
+    App::test((), |mut app| async move {
+        app.update(|ctx| {
+            assert_eq!(
+                CLIAgent::detect("grok --model grok-2", None, None, ctx),
+                Some(CLIAgent::Grok),
+            );
+            assert_eq!(
+                CLIAgent::detect("xai chat", None, None, ctx),
+                Some(CLIAgent::Grok),
+            );
+            assert_eq!(
+                CLIAgent::detect("kimi --help", None, None, ctx),
+                Some(CLIAgent::Kimi),
+            );
+            assert_eq!(
+                CLIAgent::detect("moonshot run", None, None, ctx),
+                Some(CLIAgent::Kimi),
+            );
+            assert_eq!(
+                CLIAgent::detect("minimax -v", None, None, ctx),
+                Some(CLIAgent::MiniMax),
+            );
+            assert_eq!(
+                CLIAgent::detect("mini-max --flag", None, None, ctx),
+                Some(CLIAgent::MiniMax),
+            );
+        });
+    });
+}
+
+#[test]
+fn test_detect_grok_kimi_minimax_non_matches() {
+    App::test((), |mut app| async move {
+        app.update(|ctx| {
+            assert_eq!(CLIAgent::detect("grok_wrapper", None, None, ctx), None);
+            assert_eq!(CLIAgent::detect("xkimi", None, None, ctx), None);
+            assert_eq!(CLIAgent::detect("minimax-other", None, None, ctx), None);
+            assert_eq!(CLIAgent::detect("ls", None, None, ctx), None);
+        });
+    });
+}
+
+#[test]
+fn test_detection_tokens_for_named_leaf_providers() {
+    assert_eq!(CLIAgent::Grok.detection_tokens(), &["grok", "xai"]);
+    assert_eq!(CLIAgent::Kimi.detection_tokens(), &["kimi", "moonshot"]);
+    assert_eq!(
+        CLIAgent::MiniMax.detection_tokens(),
+        &["minimax", "mini-max"]
+    );
+    assert_eq!(CLIAgent::Vibe.detection_tokens(), &["vibe", "vibe-acp"]);
+    assert_eq!(CLIAgent::Claude.detection_tokens(), &["claude"]);
 }
 
 #[test]
