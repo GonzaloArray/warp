@@ -1,10 +1,14 @@
 //! Fleet Room overlay UI (BLOOME-like group surface).
+//!
+//! Layout rule: never use `MainAxisSize::Max` unless the parent has a finite
+//! max constraint. This overlay is stacked without a size budget, so every
+//! flex is `Min` and the card is a fixed `ConstrainedBox`.
 
 use pathfinder_color::ColorU;
 use warpui::elements::{
-    Border, ChildView, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Element, Flex,
-    Hoverable, MainAxisAlignment, MainAxisSize, MouseStateHandle, Padding, ParentElement, Radius,
-    Text,
+    Align, Border, ChildView, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Element,
+    Flex, Hoverable, MainAxisAlignment, MainAxisSize, MouseStateHandle, Padding, ParentElement,
+    Radius, Text,
 };
 use warpui::fonts::{Properties, Weight};
 use warpui::platform::Cursor;
@@ -20,6 +24,8 @@ use crate::workspace::agent_fleet_room::{
 use crate::workspace::agent_provider_hub::AgentProviderId;
 
 const SIDEBAR_W: f32 = 220.;
+const CARD_W: f32 = 920.;
+const CARD_H: f32 = 580.;
 const CARD_RADIUS: f32 = 8.;
 
 pub(crate) fn render_fleet_room_overlay(
@@ -32,12 +38,15 @@ pub(crate) fn render_fleet_room_overlay(
     let main = ColorU::new(235, 235, 240, 255);
     let sub = ColorU::new(160, 160, 170, 255);
     let font = appearance.ui_font_family();
+
     let header = Flex::row()
-        .with_main_axis_size(MainAxisSize::Max)
+        .with_main_axis_size(MainAxisSize::Min)
         .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_spacing(12.)
         .with_child(
             Flex::column()
+                .with_main_axis_size(MainAxisSize::Min)
                 .with_spacing(2.)
                 .with_child(
                     Text::new_inline(room.title.clone(), font, 16.)
@@ -62,6 +71,11 @@ pub(crate) fn render_fleet_room_overlay(
             font,
             false,
         ))
+        .finish();
+
+    // Force header to card width without MainAxisSize::Max.
+    let header = ConstrainedBox::new(header)
+        .with_width(CARD_W - SIDEBAR_W - 48.)
         .finish();
 
     let mut members = Flex::column()
@@ -93,6 +107,7 @@ pub(crate) fn render_fleet_room_overlay(
         let row = Hoverable::new(MouseStateHandle::default(), move |_| {
             Container::new(
                 Flex::column()
+                    .with_main_axis_size(MainAxisSize::Min)
                     .with_spacing(4.)
                     .with_child(
                         Text::new_inline(title_c.clone(), font, 12.)
@@ -147,17 +162,24 @@ pub(crate) fn render_fleet_room_overlay(
             .finish(),
         );
     }
-    for msg in &room.messages {
+    // Cap visible messages so the fixed-height card doesn't overflow forever.
+    let start = room.messages.len().saturating_sub(24);
+    for msg in &room.messages[start..] {
         thread = thread.with_child(bubble(msg, font, main, sub));
     }
 
     let editor_el: Box<dyn Element> = if let Some(handle) = composer {
-        Container::new(ChildView::new(handle).finish())
-            .with_padding(Padding::uniform(8.))
-            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(CARD_RADIUS)))
-            .with_border(Border::all(1.).with_border_fill(theme.outline()))
-            .with_background_color(ColorU::new(255, 255, 255, 10))
-            .finish()
+        ConstrainedBox::new(
+            Container::new(ChildView::new(handle).finish())
+                .with_padding(Padding::uniform(8.))
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(CARD_RADIUS)))
+                .with_border(Border::all(1.).with_border_fill(theme.outline()))
+                .with_background_color(ColorU::new(255, 255, 255, 10))
+                .finish(),
+        )
+        .with_width(CARD_W - SIDEBAR_W - 160.)
+        .with_height(40.)
+        .finish()
     } else {
         Text::new_inline("Composer…", font, 12.)
             .with_color(sub)
@@ -165,9 +187,11 @@ pub(crate) fn render_fleet_room_overlay(
     };
 
     let composer_row = Flex::column()
+        .with_main_axis_size(MainAxisSize::Min)
         .with_spacing(8.)
         .with_child(
             Flex::row()
+                .with_main_axis_size(MainAxisSize::Min)
                 .with_spacing(6.)
                 .with_child(chip(
                     "@all",
@@ -205,15 +229,10 @@ pub(crate) fn render_fleet_room_overlay(
         )
         .with_child(
             Flex::row()
-                .with_main_axis_size(MainAxisSize::Max)
+                .with_main_axis_size(MainAxisSize::Min)
                 .with_cross_axis_alignment(CrossAxisAlignment::Center)
                 .with_spacing(8.)
-                .with_child(
-                    ConstrainedBox::new(editor_el)
-                        .with_min_height(36.)
-                        .with_max_height(48.)
-                        .finish(),
-                )
+                .with_child(editor_el)
                 .with_child(chip(
                     "Enviar",
                     WorkspaceAction::FleetRoomSend,
@@ -234,17 +253,22 @@ pub(crate) fn render_fleet_room_overlay(
         .finish();
 
     let main_col = Flex::column()
-        .with_main_axis_size(MainAxisSize::Max)
-        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Start)
         .with_spacing(10.)
         .with_child(header)
-        .with_child(thread.finish())
+        .with_child(
+            ConstrainedBox::new(thread.finish())
+                .with_width(CARD_W - SIDEBAR_W - 48.)
+                .with_max_height(CARD_H - 220.)
+                .finish(),
+        )
         .with_child(composer_row)
         .finish();
 
     let body = Flex::row()
-        .with_main_axis_size(MainAxisSize::Max)
-        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Start)
         .with_spacing(12.)
         .with_child(
             ConstrainedBox::new(
@@ -255,9 +279,14 @@ pub(crate) fn render_fleet_room_overlay(
                     .finish(),
             )
             .with_width(SIDEBAR_W)
+            .with_max_height(CARD_H - 24.)
             .finish(),
         )
-        .with_child(Container::new(main_col).with_padding(Padding::uniform(12.)).finish())
+        .with_child(
+            Container::new(main_col)
+                .with_padding(Padding::uniform(12.))
+                .finish(),
+        )
         .finish();
 
     let card = ConstrainedBox::new(
@@ -268,14 +297,18 @@ pub(crate) fn render_fleet_room_overlay(
             .with_background(theme.surface_1())
             .finish(),
     )
-    .with_width(960.)
-    .with_height(620.)
+    .with_width(CARD_W)
+    .with_height(CARD_H)
     .finish();
 
-    Container::new(card)
-        .with_padding(Padding::uniform(28.))
-        .with_background_color(ColorU::new(0, 0, 0, 150))
-        .finish()
+    // Dim backdrop fills the window; card is centered with finite size.
+    Align::new(
+        Container::new(card)
+            .with_background_color(ColorU::new(0, 0, 0, 150))
+            .with_padding(Padding::uniform(24.))
+            .finish(),
+    )
+    .finish()
 }
 
 fn bubble(
@@ -301,6 +334,7 @@ fn bubble(
     };
 
     Flex::column()
+        .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Start)
         .with_spacing(3.)
         .with_child(
@@ -385,4 +419,3 @@ fn provider_tint(id: AgentProviderId) -> ColorU {
         _ => ColorU::new(100, 100, 100, 50),
     }
 }
-
