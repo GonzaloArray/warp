@@ -7,7 +7,7 @@ use pathfinder_color::ColorU;
 use pathfinder_geometry::vector::vec2f;
 use warpui::elements::{
     Align, Border, ChildAnchor, ChildView, ConstrainedBox, Container, CornerRadius,
-    CrossAxisAlignment, Element, Flex, Hoverable, MainAxisAlignment, MainAxisSize,
+    CrossAxisAlignment, Element, Flex, Hoverable, MainAxisSize,
     MouseStateHandle, OffsetPositioning, Padding, ParentAnchor, ParentElement, ParentOffsetBounds,
     Radius, Stack, Text,
 };
@@ -179,47 +179,55 @@ impl View for FleetRoomModal {
     }
 
     fn render(&self, app: &AppContext) -> Box<dyn Element> {
+        // CRITICAL: no MainAxisSize::Max anywhere — positioned overlays can
+        // pass infinite max on one axis and Max flex panics in debug.
         let appearance = Appearance::as_ref(app);
         let theme = appearance.theme();
         let font = appearance.ui_font_family();
         let main = ColorU::new(235, 235, 240, 255);
         let sub = ColorU::new(160, 160, 170, 255);
+        let content_w = CARD_W - SIDEBAR_W - 48.;
 
-        let header = Flex::row()
-            .with_main_axis_size(MainAxisSize::Max)
-            .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
-            .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_child(
-                Flex::column()
-                    .with_spacing(2.)
-                    .with_child(
-                        Text::new_inline(self.room.title.clone(), font, 16.)
-                            .with_color(main)
-                            .with_style(Properties::default().weight(Weight::Bold))
-                            .finish(),
-                    )
-                    .with_child(
-                        Text::new_inline(
-                            format!(
-                                "{} agents · sala multiagent local",
-                                self.room.members.len()
-                            ),
-                            font,
-                            11.,
+        let header = ConstrainedBox::new(
+            Flex::row()
+                .with_main_axis_size(MainAxisSize::Min)
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_spacing(16.)
+                .with_child(
+                    Flex::column()
+                        .with_main_axis_size(MainAxisSize::Min)
+                        .with_spacing(2.)
+                        .with_child(
+                            Text::new_inline(self.room.title.clone(), font, 16.)
+                                .with_color(main)
+                                .with_style(Properties::default().weight(Weight::Bold))
+                                .finish(),
                         )
-                        .with_color(sub)
+                        .with_child(
+                            Text::new_inline(
+                                format!(
+                                    "{} agents · sala multiagent local",
+                                    self.room.members.len()
+                                ),
+                                font,
+                                11.,
+                            )
+                            .with_color(sub)
+                            .finish(),
+                        )
                         .finish(),
-                    )
-                    .finish(),
-            )
-            .with_child(chip(
-                "Cerrar",
-                self.close_ms.clone(),
-                FleetRoomModalAction::Close,
-                font,
-                false,
-            ))
-            .finish();
+                )
+                .with_child(chip(
+                    "Cerrar",
+                    self.close_ms.clone(),
+                    FleetRoomModalAction::Close,
+                    font,
+                    false,
+                ))
+                .finish(),
+        )
+        .with_width(content_w)
+        .finish();
 
         let mut members_col = Flex::column()
             .with_main_axis_size(MainAxisSize::Min)
@@ -238,16 +246,8 @@ impl View for FleetRoomModal {
         for (i, member) in self.room.members.iter().enumerate() {
             let selected = self.room.selected_provider == Some(member.provider);
             let provider = member.provider;
-            let ms = self
-                .member_ms
-                .get(i)
-                .cloned()
-                .unwrap_or_default();
-            let lms = self
-                .launch_ms
-                .get(i)
-                .cloned()
-                .unwrap_or_default();
+            let ms = self.member_ms.get(i).cloned().unwrap_or_default();
+            let lms = self.launch_ms.get(i).cloned().unwrap_or_default();
             let title = member.slot_label.clone();
             let meta = format!(
                 "{} · {} · @{}",
@@ -262,6 +262,7 @@ impl View for FleetRoomModal {
             let row = Hoverable::new(ms, move |_| {
                 Container::new(
                     Flex::column()
+                        .with_main_axis_size(MainAxisSize::Min)
                         .with_spacing(4.)
                         .with_child(
                             Text::new_inline(title.clone(), font, 12.)
@@ -291,15 +292,13 @@ impl View for FleetRoomModal {
                 ctx.dispatch_typed_action(FleetRoomModalAction::SelectMember(provider));
             })
             .finish();
-            members_col = members_col
-                .with_child(row)
-                .with_child(chip(
-                    "Abrir CLI",
-                    lms,
-                    FleetRoomModalAction::LaunchMember(provider),
-                    font,
-                    false,
-                ));
+            members_col = members_col.with_child(row).with_child(chip(
+                "Abrir CLI",
+                lms,
+                FleetRoomModalAction::LaunchMember(provider),
+                font,
+                false,
+            ));
         }
 
         let mut thread = Flex::column()
@@ -308,16 +307,12 @@ impl View for FleetRoomModal {
             .with_spacing(6.);
         if self.room.messages.is_empty() {
             thread = thread.with_child(
-                Text::new_inline(
-                    "Sin mensajes. Usá @claude @codex @all…",
-                    font,
-                    12.,
-                )
-                .with_color(sub)
-                .finish(),
+                Text::new_inline("Sin mensajes. Usá @claude @codex @all…", font, 12.)
+                    .with_color(sub)
+                    .finish(),
             );
         }
-        let start = self.room.messages.len().saturating_sub(20);
+        let start = self.room.messages.len().saturating_sub(16);
         for msg in &self.room.messages[start..] {
             thread = thread.with_child(bubble(msg, font, main, sub));
         }
@@ -330,6 +325,7 @@ impl View for FleetRoomModal {
                 .with_background_color(ColorU::new(255, 255, 255, 12))
                 .finish(),
         )
+        .with_width(content_w - 100.)
         .with_height(40.)
         .finish();
 
@@ -354,11 +350,12 @@ impl View for FleetRoomModal {
         }
 
         let composer_row = Flex::column()
+            .with_main_axis_size(MainAxisSize::Min)
             .with_spacing(8.)
             .with_child(mention_row.finish())
             .with_child(
                 Flex::row()
-                    .with_main_axis_size(MainAxisSize::Max)
+                    .with_main_axis_size(MainAxisSize::Min)
                     .with_cross_axis_alignment(CrossAxisAlignment::Center)
                     .with_spacing(8.)
                     .with_child(editor)
@@ -372,32 +369,33 @@ impl View for FleetRoomModal {
                     .finish(),
             )
             .with_child(
-                Text::new_inline(
-                    "Enviar lanza CLIs reales en tabs nuevos.",
-                    font,
-                    10.,
-                )
-                .with_color(sub)
-                .finish(),
-            )
-            .finish();
-
-        let main_col = Flex::column()
-            .with_main_axis_size(MainAxisSize::Max)
-            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_spacing(10.)
-            .with_child(header)
-            .with_child(
-                ConstrainedBox::new(thread.finish())
-                    .with_max_height(CARD_H - 240.)
+                Text::new_inline("Enviar lanza CLIs reales en tabs nuevos.", font, 10.)
+                    .with_color(sub)
                     .finish(),
             )
-            .with_child(composer_row)
             .finish();
 
+        let main_col = ConstrainedBox::new(
+            Flex::column()
+                .with_main_axis_size(MainAxisSize::Min)
+                .with_cross_axis_alignment(CrossAxisAlignment::Start)
+                .with_spacing(10.)
+                .with_child(header)
+                .with_child(
+                    ConstrainedBox::new(thread.finish())
+                        .with_width(content_w)
+                        .with_max_height(CARD_H - 240.)
+                        .finish(),
+                )
+                .with_child(composer_row)
+                .finish(),
+        )
+        .with_width(content_w + 20.)
+        .finish();
+
         let body = Flex::row()
-            .with_main_axis_size(MainAxisSize::Max)
-            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_cross_axis_alignment(CrossAxisAlignment::Start)
             .with_spacing(12.)
             .with_child(
                 ConstrainedBox::new(
@@ -408,6 +406,7 @@ impl View for FleetRoomModal {
                         .finish(),
                 )
                 .with_width(SIDEBAR_W)
+                .with_max_height(CARD_H - 20.)
                 .finish(),
             )
             .with_child(
@@ -417,18 +416,20 @@ impl View for FleetRoomModal {
             )
             .finish();
 
-        let card = Container::new(
-            ConstrainedBox::new(body)
-                .with_width(CARD_W)
-                .with_height(CARD_H)
+        // Fixed-size card — no Max flex, no infinite axes.
+        let card = ConstrainedBox::new(
+            Container::new(body)
+                .with_background(theme.surface_1())
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(12.)))
+                .with_border(Border::all(1.).with_border_fill(theme.outline()))
+                .with_padding(Padding::uniform(8.))
                 .finish(),
         )
-        .with_background(theme.surface_1())
-        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(12.)))
-        .with_border(Border::all(1.).with_border_fill(theme.outline()))
-        .with_padding(Padding::uniform(4.))
+        .with_width(CARD_W)
+        .with_height(CARD_H)
         .finish();
 
+        // Full-window dim layer + centered card (FreeAiRemovalModal pattern).
         let mut stack = Stack::new();
         stack.add_positioned_child(
             card,
