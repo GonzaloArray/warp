@@ -13,7 +13,7 @@ use warpui::elements::{
     Border, ClippedScrollable, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment,
     DragBarSide, Element, Empty, Expanded, Fill as ElementFill, Flex, Hoverable, MainAxisAlignment,
     MainAxisSize, MouseStateHandle, Padding, ParentElement, Radius, Rect, Resizable,
-    ResizableStateHandle, ScrollbarWidth, Shrinkable, Text, resizable_state_handle,
+    ScrollbarWidth, Shrinkable, Text,
 };
 use warpui::fonts::Weight;
 use warpui::platform::Cursor;
