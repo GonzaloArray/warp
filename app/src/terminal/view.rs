@@ -2814,6 +2814,8 @@ pub struct TerminalView {
     codex_shell: std::cell::RefCell<crate::workspace::codex_session_shell::CodexSessionShellState>,
     /// Free-text search for the shell history list.
     codex_history_search: ViewHandle<crate::editor::EditorView>,
+    /// Drag-resize handle for the in-session agents nav column.
+    codex_shell_nav_resize: warpui::elements::ResizableStateHandle,
     use_agent_footer: ViewHandle<UseAgentToolbar>,
 
     agent_view_controller: ModelHandle<AgentViewController>,
@@ -4410,6 +4412,10 @@ impl TerminalView {
                     _ => {}
                 });
                 editor
+            },
+            codex_shell_nav_resize: {
+                use warpui::elements::resizable_state_handle;
+                resizable_state_handle(268.)
             },
             use_agent_footer: use_agent_button_bar,
             agent_view_controller,

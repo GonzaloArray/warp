@@ -11,9 +11,9 @@ use warp_core::ui::icons::Icon as CoreIcon;
 use warp_core::ui::theme::color::internal_colors;
 use warpui::elements::{
     Border, ClippedScrollable, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment,
-    Element, Empty, Expanded, Fill as ElementFill, Flex, Hoverable, MainAxisAlignment,
-    MainAxisSize, MouseStateHandle, Padding, ParentElement, Radius, Rect, ScrollbarWidth,
-    Shrinkable, Text,
+    DragBarSide, Element, Empty, Expanded, Fill as ElementFill, Flex, Hoverable, MainAxisAlignment,
+    MainAxisSize, MouseStateHandle, Padding, ParentElement, Radius, Rect, Resizable,
+    ResizableStateHandle, ScrollbarWidth, Shrinkable, Text, resizable_state_handle,
 };
 use warpui::fonts::Weight;
 use warpui::platform::Cursor;
@@ -38,7 +38,9 @@ use crate::workspace::codex_session_shell::{
     live_children_for_terminal, reconcile_shell_membership, should_show_shell,
 };
 
-const NAV_COL_WIDTH: f32 = 268.;
+const NAV_COL_WIDTH_DEFAULT: f32 = 268.;
+const NAV_COL_WIDTH_MIN: f32 = 220.;
+const NAV_COL_WIDTH_MAX_RATIO: f32 = 0.45;
 /// How many activity feed lines to show in the center column.
 const DETAIL_FEED_LINES: usize = 80;
 const DETAIL_TOOL_LINES: usize = 40;
@@ -210,6 +212,21 @@ impl TerminalView {
             CodexShellAction::ToggleHistoryTodayFilter => shell.toggle_history_today_only(),
             CodexShellAction::RetryPendingArchives => {
                 // Handled above before borrow.
+            }
+            CodexShellAction::RerunHistory { history_id } => {
+                use crate::workspace::codex_session_shell::format_history_rerun_prompt;
+                let prompt = shell
+                    .history
+                    .iter()
+                    .find(|h| h.id == history_id || h.child_key == history_id)
+                    .and_then(format_history_rerun_prompt);
+                shell.select_parent();
+                drop(shell);
+                if let Some(prompt) = prompt {
+                    let _ = self.try_send_text_to_cli_agent_or_rich_input(prompt, ctx);
+                }
+                ctx.notify();
+                return;
             }
             CodexShellAction::CancelConfirms => shell.cancel_pending_confirms(),
         }
@@ -395,22 +412,29 @@ impl TerminalView {
 
         let appearance = Appearance::as_ref(app);
         let theme = appearance.theme();
-        // Center = todo (terminal / activity). Right = agents (3ª columna del workspace).
+        // Center = todo (terminal / activity). Right = agents (resizable nav).
+        let nav_panel = Container::new(nav)
+            .with_background(internal_colors::fg_overlay_1(theme))
+            .with_border(Border::left(1.).with_border_fill(theme.outline()))
+            .with_padding(Padding::uniform(12.))
+            .finish();
+        let nav_resizable = Resizable::new(self.codex_shell_nav_resize.clone(), nav_panel)
+            .with_dragbar_side(DragBarSide::Left)
+            .with_dragbar_color(ElementFill::from(theme.outline()))
+            .on_resize(move |ctx, _| {
+                ctx.notify();
+            })
+            .with_bounds_callback(Box::new(|window_size| {
+                let min_w = NAV_COL_WIDTH_MIN;
+                let max_w = (window_size.x() * NAV_COL_WIDTH_MAX_RATIO).max(min_w);
+                (min_w, max_w)
+            }))
+            .finish();
         Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
             .with_child(Shrinkable::new(1., center).finish())
-            .with_child(
-                ConstrainedBox::new(
-                    Container::new(nav)
-                        .with_background(internal_colors::fg_overlay_1(theme))
-                        .with_border(Border::left(1.).with_border_fill(theme.outline()))
-                        .with_padding(Padding::uniform(12.))
-                        .finish(),
-                )
-                .with_width(NAV_COL_WIDTH)
-                .finish(),
-            )
+            .with_child(nav_resizable)
             .finish()
     }
 }
@@ -438,6 +462,8 @@ pub(crate) enum CodexShellAction {
     SetHistoryQuery { query: String },
     ToggleHistoryTodayFilter,
     RetryPendingArchives,
+    /// Re-run similar objective into parent agent PTY / rich input.
+    RerunHistory { history_id: String },
     CancelConfirms,
 }
 
@@ -2014,9 +2040,11 @@ fn render_history_detail_column(
         ));
     }
 
+    use crate::workspace::codex_session_shell::format_history_rerun_prompt;
     let summary = format_history_copy_summary(entry);
     let result_copy = format_history_copy_result(entry);
-    let actions = Flex::row()
+    let can_rerun = format_history_rerun_prompt(entry).is_some();
+    let mut actions = Flex::row()
         .with_spacing(8.)
         .with_child(action_chip(
             profile.back_to_parent,
@@ -2024,7 +2052,20 @@ fn render_history_detail_column(
             appearance,
             theme,
             ChipTone::Primary,
-        ))
+        ));
+    if can_rerun {
+        actions = actions.with_child(action_chip(
+            "Re-run similar",
+            WorkspaceAction::CodexShellRerunHistory {
+                terminal_view_id,
+                history_id: entry.id.clone(),
+            },
+            appearance,
+            theme,
+            ChipTone::Primary,
+        ));
+    }
+    let actions = actions
         .with_child(action_chip(
             "Copiar resumen",
             WorkspaceAction::CopyTextToClipboard(summary),

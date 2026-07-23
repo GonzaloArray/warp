@@ -614,6 +614,11 @@ pub enum WorkspaceAction {
     CodexShellRetryPendingArchives {
         terminal_view_id: EntityId,
     },
+    /// Re-inject a similar objective into the parent CLI agent from history.
+    CodexShellRerunHistory {
+        terminal_view_id: EntityId,
+        history_id: String,
+    },
     /// An action to view a newly created/edited workflow in WD from the toast
     ViewObjectInWarpDrive(WarpDriveItemId),
     /// Open the object's sharing settings in WD.
@@ -1288,6 +1293,7 @@ impl WorkspaceAction {
             | CodexShellSetHistoryQuery { .. }
             | CodexShellToggleHistoryTodayFilter { .. }
             | CodexShellRetryPendingArchives { .. }
+            | CodexShellRerunHistory { .. }
             | DumpDebugInfo
             | LogReviewCommentSendStatusForActiveTab
             | ToggleRecordingMode

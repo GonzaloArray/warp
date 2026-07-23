@@ -193,26 +193,26 @@ Specs previos:
 
 | # | Entrega | Done when |
 |---|---------|-----------|
-| P0.1 | **Semántica única de estados** en rail + shell + ops | Mismos labels ES y colores: Working blue, Waiting yellow, Blocked/Failed red, Completed green, Unseen completed = “terminado · sin revisar” |
-| P0.2 | **Rollup** padre refleja peor hijo activo | Parent badge = max(urgency) de children |
-| P0.3 | **Shell in-session** usable y limpio | Nav cards + detail sections (ya polish); empty states honestos; filtros history sin muro |
-| P0.4 | **done → history** con validación | No hollow templates; persist-before-drop; retry archive |
-| P0.5 | **Jump paths** | Rail → pane; shell nav → detail o parent terminal; attention strip → agente |
-| P0.6 | **Launch** New/Resume fiable desde + | Labels visibles; resume con session id cuando exista |
-| P0.7 | Tests dominio | nextest pure models verdes; smoke WarpOss |
+| P0.1 | **Semántica única de estados** en rail + shell + ops | ✅ labels ES + colores shell/rail/ops |
+| P0.2 | **Rollup** padre refleja peor hijo activo | ✅ `AgentUiProfile::rollup_status` en projection |
+| P0.3 | **Shell in-session** usable y limpio | ✅ nav + detail + scroll + densificación |
+| P0.4 | **done → history** con validación | ✅ archive validation + persist-before-drop |
+| P0.5 | **Jump paths** | ✅ select parent/child/history + toast focus |
+| P0.6 | **Launch** New/Resume fiable desde + | ✅ provider hub launch lines |
+| P0.7 | Tests dominio | ✅ nextest codex_session_shell + presentation + evidence |
 
-**Out of P0:** screen manifests, socket API, sound, remote handoff.
+**Out of P0:** socket API, sound, remote handoff (P2).
 
 ### P1 — “Detection & attention quality”
 
 | # | Entrega | Done when |
 |---|---------|-----------|
-| P1.1 | **Screen evidence layer** (Warp-owned) | Bottom-buffer / OSC title rules **propias** por agent id; blocked solo con evidencia visible |
-| P1.2 | **Authority merge** | Integration hooks pisan heuristic; documentado en `agent_ops` |
-| P1.3 | **Notifications** | Toast (o system) cuando blocked/done en pane no enfocado |
-| P1.4 | **Search history free-text** | Input real en shell (no solo action stub) |
-| P1.5 | **Nav resize** | Drag o preferencia de ancho del nav column |
-| P1.6 | **Re-run similar** | Acción opcional desde history (prompt copy / re-launch) |
+| P1.1 | **Screen evidence layer** (Warp-owned) | ✅ `agent_screen_evidence` + merge en projection |
+| P1.2 | **Authority merge** | ✅ EventSource + merge_status_with_evidence |
+| P1.3 | **Notifications** | ✅ AgentToast blocked/done/failed unfocused |
+| P1.4 | **Search history free-text** | ✅ TextInput “Buscar en historial…” |
+| P1.5 | **Nav resize** | ✅ Resizable dragbar Left on shell nav |
+| P1.6 | **Re-run similar** | ✅ `format_history_rerun_prompt` + action chip |
 
 ### P2 — “Orchestration surface”
 

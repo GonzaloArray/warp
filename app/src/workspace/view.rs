@@ -26069,6 +26069,22 @@ impl TypedActionView for Workspace {
                     });
                 }
             }
+            CodexShellRerunHistory {
+                terminal_view_id,
+                history_id,
+            } => {
+                if let Some(tv) = self.terminal_view(*terminal_view_id, ctx) {
+                    let history_id = history_id.clone();
+                    tv.update(ctx, |tv, ctx| {
+                        tv.apply_codex_shell_action(
+                            crate::terminal::view::codex_shell::CodexShellAction::RerunHistory {
+                                history_id,
+                            },
+                            ctx,
+                        );
+                    });
+                }
+            }
             CodexShellRetryPendingArchives { terminal_view_id } => {
                 if let Some(tv) = self.terminal_view(*terminal_view_id, ctx) {
                     tv.update(ctx, |tv, ctx| {

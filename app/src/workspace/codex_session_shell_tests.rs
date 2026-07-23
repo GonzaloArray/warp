@@ -413,6 +413,54 @@ fn select_all_visible_only_adds_filtered_ids() {
     );
 }
 
+fn sample_history_entry(key: &str) -> HistorySubagentEntry {
+    HistorySubagentEntry {
+        id: format!("id-{key}"),
+        child_key: key.into(),
+        display_name: key.into(),
+        parent_label: "Agente principal".into(),
+        platform: "Codex".into(),
+        status: HistoryStatus::Completed,
+        status_label: "terminado".into(),
+        result_summary: Some("ok".into()),
+        task_summary: None,
+        objective: None,
+        work_summary: None,
+        activity_highlights: Vec::new(),
+        tools_used: Vec::new(),
+        files_changed: Vec::new(),
+        parent_handoff: None,
+        errors: Vec::new(),
+        pending: Vec::new(),
+        started_at_ms: 0,
+        finished_at_ms: 1,
+        technical_details: Vec::new(),
+    }
+}
+
+#[test]
+fn format_history_rerun_prompt_includes_objective() {
+    use super::format_history_rerun_prompt;
+    let mut e = sample_history_entry("k1");
+    e.objective = Some("Implement login flow".into());
+    e.work_summary = Some("Added auth routes".into());
+    e.files_changed = vec!["app/src/auth.rs".into()];
+    let p = format_history_rerun_prompt(&e).expect("prompt");
+    assert!(p.contains("Implement login flow"));
+    assert!(p.contains("Added auth routes"));
+    assert!(p.contains("app/src/auth.rs"));
+    assert!(p.contains("Re-run"));
+}
+
+#[test]
+fn format_history_rerun_prompt_none_without_objective() {
+    use super::format_history_rerun_prompt;
+    let mut e = sample_history_entry("k2");
+    e.objective = None;
+    e.task_summary = None;
+    assert!(format_history_rerun_prompt(&e).is_none());
+}
+
 #[test]
 fn set_history_query_filters_nav_list() {
     let mut state = CodexSessionShellState::new();

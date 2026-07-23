@@ -1130,6 +1130,44 @@ pub(crate) fn format_history_copy_result(entry: &HistorySubagentEntry) -> String
         .unwrap_or_else(|| "Sin resultado guardado.".into())
 }
 
+/// Prompt re-injected into the parent agent to re-run a similar task.
+pub(crate) fn format_history_rerun_prompt(entry: &HistorySubagentEntry) -> Option<String> {
+    let objective = entry
+        .objective
+        .as_ref()
+        .or(entry.task_summary.as_ref())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())?;
+    let mut prompt = format!(
+        "Re-run a similar task to the previous subagent \"{}\".\n\nObjective:\n{objective}\n",
+        entry.display_name
+    );
+    if let Some(work) = entry.work_summary.as_ref().filter(|s| !s.trim().is_empty()) {
+        prompt.push_str("\nPrevious work notes:\n");
+        prompt.push_str(work.trim());
+        prompt.push('\n');
+    }
+    if !entry.files_changed.is_empty() {
+        let files: Vec<_> = entry
+            .files_changed
+            .iter()
+            .filter(|f| !f.to_lowercase().contains("no se realizaron"))
+            .take(12)
+            .cloned()
+            .collect();
+        if !files.is_empty() {
+            prompt.push_str("\nFiles previously touched:\n");
+            for f in files {
+                prompt.push_str("- ");
+                prompt.push_str(&f);
+                prompt.push('\n');
+            }
+        }
+    }
+    prompt.push_str("\nPlease continue or redo this work with the current repo state.\n");
+    Some(prompt)
+}
+
 /// Group consecutive same-kind tool lines for compact timeline display.
 /// Returns (title, children) groups; non-groupable lines are single-item groups.
 pub(crate) fn group_timeline_actions(lines: &[String]) -> Vec<(String, Vec<String>)> {

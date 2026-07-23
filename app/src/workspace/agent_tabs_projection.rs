@@ -312,6 +312,9 @@ impl AgentTabsProjection {
                 }
             }
 
+            let child_statuses: Vec<AgentTabStatus> =
+                children.iter().map(|c| c.status).collect();
+
             for child in children {
                 let child_id = MonitorNodeId::ExternalChild {
                     parent: session.terminal_view_id,
@@ -363,7 +366,7 @@ impl AgentTabsProjection {
                 });
             }
 
-            // Parent rollup badge: "3 subagents · 2 trabajando · 1 completado"
+            // Parent rollup: worst child status + glanceable counts.
             if let Some(root) = nodes.iter_mut().find(|n| n.id == root_id) {
                 let counts = descendants;
                 let total = counts.working
@@ -372,6 +375,30 @@ impl AgentTabsProjection {
                     + counts.failed
                     + counts.unavailable;
                 if total > 0 {
+                    if let Some(worst) =
+                        crate::workspace::agent_presentation::AgentUiProfile::rollup_status(
+                            child_statuses,
+                        )
+                    {
+                        let parent_u =
+                            crate::workspace::agent_presentation::AgentUiProfile::status_urgency(
+                                root.status,
+                            );
+                        let worst_u =
+                            crate::workspace::agent_presentation::AgentUiProfile::status_urgency(
+                                worst,
+                            );
+                        if worst_u > parent_u {
+                            root.status = worst;
+                        }
+                        root.needs_attention = matches!(
+                            root.status,
+                            AgentTabStatus::Blocked
+                                | AgentTabStatus::Failed
+                                | AgentTabStatus::Waiting
+                        ) || counts.blocked > 0
+                            || counts.failed > 0;
+                    }
                     root.ops_primary = Some(format!(
                         "{total} subagent{}",
                         if total == 1 { "" } else { "s" }
@@ -804,11 +831,30 @@ impl AgentTabsProjection {
                         last_event_ms: node.last_event_ms,
                     })
                     .collect();
+                    let base_status = status_for_external(&session.status);
+                    let evidence = crate::workspace::agent_screen_evidence::evidence_from_parts(
+                        session.session_context.display_title().as_deref(),
+                        session
+                            .session_context
+                            .summary
+                            .iter()
+                            .chain(session.session_context.tool_name.iter())
+                            .map(String::as_str),
+                    );
+                    let classified =
+                        crate::workspace::agent_screen_evidence::classify_screen_evidence(
+                            provider, &evidence,
+                        );
+                    let status =
+                        crate::workspace::agent_screen_evidence::merge_status_with_evidence(
+                            base_status,
+                            classified,
+                        );
                     ExternalAgentSessionSnapshot {
                         terminal_view_id,
                         provider,
                         profile_key,
-                        status: status_for_external(&session.status),
+                        status,
                         session_id,
                         children,
                     }
