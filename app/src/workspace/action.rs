@@ -205,6 +205,24 @@ pub enum WorkspaceAction {
         provider: crate::workspace::agent_provider_hub::AgentProviderId,
         enabled: bool,
     },
+    /// Opens the multi-agent Fleet Room (Local Agents group chat).
+    OpenFleetRoom,
+    /// Closes the Fleet Room overlay.
+    CloseFleetRoom,
+    /// Send composer text to mentioned / default agents.
+    FleetRoomSend,
+    /// Highlight a member in the Fleet Room sidebar.
+    FleetRoomSelectMember {
+        provider: crate::workspace::agent_provider_hub::AgentProviderId,
+    },
+    /// Launch one member's CLI from the Fleet Room.
+    FleetRoomLaunchMember {
+        provider: crate::workspace::agent_provider_hub::AgentProviderId,
+    },
+    /// Insert `@token` into the fleet composer.
+    FleetRoomInsertMention {
+        token: String,
+    },
     TabHoverWidthStart {
         width: f32,
     },
@@ -1407,7 +1425,13 @@ impl WorkspaceAction {
             | AddAgentProjectTask { .. }
             | AddAgentProjectWorker { .. }
             | LaunchAgentProvider { .. }
-            | SetAgentProviderEnabled { .. } => false,
+            | SetAgentProviderEnabled { .. }
+            | OpenFleetRoom
+            | CloseFleetRoom
+            | FleetRoomSend
+            | FleetRoomSelectMember { .. }
+            | FleetRoomLaunchMember { .. }
+            | FleetRoomInsertMention { .. } => false,
             #[cfg(target_os = "linux")]
             DismissWaylandCrashRecoveryBannerAndOpenLink => false,
             #[cfg(target_family = "wasm")]

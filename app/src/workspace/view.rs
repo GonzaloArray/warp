@@ -1163,6 +1163,10 @@ pub struct Workspace {
     /// Ops domain store (multi-dim state + alerts). Seeded from disk; live CLI
     /// session events update it. Projection enrichment reads this on refresh.
     agent_ops_store: crate::workspace::agent_ops::AgentOpsStore,
+    /// Multi-agent group chat (BLOOME-like Local Agents room).
+    fleet_room: crate::workspace::agent_fleet_room::FleetRoom,
+    fleet_room_open: bool,
+    fleet_composer: Option<ViewHandle<EditorView>>,
     /// User-created agent projects (accordion roots in the rail).
     agent_projects: crate::workspace::agent_project::AgentProjectStore,
     agent_monitor_profile_editor: ViewHandle<AgentProfileEditorView>,
@@ -3584,6 +3588,9 @@ impl Workspace {
             agent_ops_store: crate::workspace::agent_ops::AgentOpsStore::load(
                 &crate::workspace::agent_ops::AgentOpsStore::default_path(),
             ),
+            fleet_room: crate::workspace::agent_fleet_room::FleetRoom::new_local(),
+            fleet_room_open: false,
+            fleet_composer: None,
             agent_projects: crate::workspace::agent_project::AgentProjectStore::load_default(),
             agent_monitor_profile_editor,
             is_agent_monitor_profile_editor_open: false,
@@ -7058,6 +7065,15 @@ impl Workspace {
                 }
             }
             menu_items.push(
+                MenuItemFields::new("Local Agents · Sala multiagent")
+                    .with_on_select_action(WorkspaceAction::OpenFleetRoom)
+                    .with_icon(icons::Icon::AiAssistant)
+                    .with_tooltip(
+                        "Grupo multiagent: un hilo, @claude @codex @grok, CLIs reales en tabs.",
+                    )
+                    .into_item(),
+            );
+            menu_items.push(
                 MenuItemFields::new("Configurar proveedores CLI…")
                     .with_on_select_action(WorkspaceAction::ShowSettingsPage(
                         crate::settings_view::SettingsSection::ThirdPartyCLIAgents,
@@ -8413,25 +8429,134 @@ impl Workspace {
         mode: crate::workspace::agent_provider_hub::AgentProviderLaunchMode,
         ctx: &mut ViewContext<Self>,
     ) {
-        // Monitor-first: force the agent rail so the new session is visible.
-        self.ensure_agent_monitor_rail_visible(ctx);
-        // New tab inherits previous-dir when that setting is on (typical for
-        // project work) so the CLI starts in the repo the user is already in.
-        self.add_terminal_tab(true, ctx);
         let command = provider.launch_shell_line(mode);
-        // Terminal mode (not Warp AI agent mode): the external CLI is the agent.
-        // Prefill + submit so the user lands in the provider immediately.
-        // If the CLI is missing, the shell surfaces the install error.
+        self.launch_shell_command_in_new_tab(&command, ctx);
+    }
+
+    /// Prefill + submit a shell command in a fresh terminal tab (CLI agent path).
+    fn launch_shell_command_in_new_tab(&mut self, command: &str, ctx: &mut ViewContext<Self>) {
+        self.ensure_agent_monitor_rail_visible(ctx);
+        self.add_terminal_tab(true, ctx);
         if let Some(input) = self.get_active_input_view_handle(ctx) {
             input.update(ctx, |input, ctx| {
                 input.set_input_mode_terminal(false, ctx);
-                input.replace_buffer_content(&command, ctx);
+                input.replace_buffer_content(command, ctx);
                 input.input_enter(ctx);
                 ctx.notify();
             });
         } else {
-            self.insert_in_input(&command, true, true, false, ctx);
+            self.insert_in_input(command, true, true, false, ctx);
         }
+        ctx.notify();
+    }
+
+    fn open_fleet_room(&mut self, ctx: &mut ViewContext<Self>) {
+        use crate::workspace::agent_provider_hub::{
+            AgentProviderHubPrefs, AgentProviderId, command_on_path,
+        };
+        let prefs = AgentProviderHubPrefs::load_default();
+        let enabled: Vec<AgentProviderId> = AgentProviderId::ALL
+            .into_iter()
+            .filter(|id| prefs.is_enabled(*id))
+            .collect();
+        let enabled = if enabled.is_empty() {
+            AgentProviderId::DEFAULT_ENABLED.to_vec()
+        } else {
+            enabled
+        };
+        self.fleet_room.sync_members(enabled, |id| {
+            id.detect_commands().iter().any(|c| command_on_path(c))
+        });
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        self.fleet_room.seed_welcome_if_needed(now_ms);
+
+        if self.fleet_composer.is_none() {
+            let handle = ctx.add_typed_action_view(|ctx| {
+                let appearance = Appearance::as_ref(ctx);
+                let mut editor = EditorView::single_line(
+                    SingleLineEditorOptions {
+                        text: TextOptions::ui_text(
+                            Some(appearance.ui_font_size()),
+                            appearance,
+                        ),
+                        select_all_on_focus: false,
+                        clear_selections_on_blur: false,
+                        propagate_and_no_op_vertical_navigation_keys:
+                            PropagateAndNoOpNavigationKeys::Always,
+                        ..Default::default()
+                    },
+                    ctx,
+                );
+                editor.set_placeholder_text("Mensaje al grupo · @claude @codex @all…", ctx);
+                editor
+            });
+            ctx.subscribe_to_view(&handle, |me, _editor_view, event, ctx| match event {
+                EditorEvent::Enter => {
+                    me.fleet_room_send(ctx);
+                }
+                EditorEvent::Escape => {
+                    me.fleet_room_open = false;
+                    ctx.notify();
+                }
+                _ => {}
+            });
+            self.fleet_composer = Some(handle);
+        }
+        self.fleet_room_open = true;
+        if let Some(composer) = &self.fleet_composer {
+            ctx.focus(composer);
+        }
+        ctx.notify();
+    }
+
+    fn fleet_room_send(&mut self, ctx: &mut ViewContext<Self>) {
+        let draft = self
+            .fleet_composer
+            .as_ref()
+            .map(|ed| ed.as_ref(ctx).buffer_text(ctx))
+            .unwrap_or_default();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let Some(plan) = self.fleet_room.send_user_message(&draft, now_ms) else {
+            return;
+        };
+        if let Some(composer) = &self.fleet_composer {
+            composer.update(ctx, |ed, ctx| {
+                ed.set_buffer_text("", ctx);
+            });
+        }
+        for route in plan.routes {
+            let cmd = crate::workspace::agent_fleet_room::launch_shell_for_route(
+                route.provider,
+                &route.prompt,
+            );
+            self.launch_shell_command_in_new_tab(&cmd, ctx);
+        }
+        ctx.notify();
+    }
+
+    fn fleet_room_insert_mention(&mut self, token: &str, ctx: &mut ViewContext<Self>) {
+        let Some(composer) = self.fleet_composer.clone() else {
+            return;
+        };
+        let current = composer.as_ref(ctx).buffer_text(ctx);
+        let mention = format!("@{token}");
+        let next = if current.trim().is_empty() {
+            format!("{mention} ")
+        } else if current.contains(&mention) {
+            current
+        } else {
+            format!("{current} {mention} ")
+        };
+        composer.update(ctx, |ed, ctx| {
+            ed.set_buffer_text(&next, ctx);
+        });
+        ctx.focus(&composer);
         ctx.notify();
     }
 
@@ -25272,6 +25397,30 @@ impl TypedActionView for Workspace {
             SetAgentProviderEnabled { provider, enabled } => {
                 self.set_agent_provider_enabled(*provider, *enabled, ctx);
             }
+            OpenFleetRoom => {
+                self.open_fleet_room(ctx);
+            }
+            CloseFleetRoom => {
+                self.fleet_room_open = false;
+                ctx.notify();
+            }
+            FleetRoomSend => {
+                self.fleet_room_send(ctx);
+            }
+            FleetRoomSelectMember { provider } => {
+                self.fleet_room.select_member(Some(*provider));
+                ctx.notify();
+            }
+            FleetRoomLaunchMember { provider } => {
+                self.launch_agent_provider(
+                    *provider,
+                    crate::workspace::agent_provider_hub::AgentProviderLaunchMode::NewSession,
+                    ctx,
+                );
+            }
+            FleetRoomInsertMention { token } => {
+                self.fleet_room_insert_mention(token, ctx);
+            }
             SetVerticalTabsDisplayGranularity(granularity) => {
                 let granularity = *granularity;
                 TabSettings::handle(ctx).update(ctx, |settings, ctx| {
@@ -28247,6 +28396,14 @@ impl View for Workspace {
 
         if self.current_workspace_state.is_codex_modal_open {
             stack.add_child(ChildView::new(&self.codex_modal).finish());
+        }
+
+        if self.fleet_room_open {
+            stack.add_child(crate::workspace::agent_fleet_room_ui::render_fleet_room_overlay(
+                &self.fleet_room,
+                self.fleet_composer.as_ref(),
+                app,
+            ));
         }
 
         if FeatureFlag::CloudMode.is_enabled()
