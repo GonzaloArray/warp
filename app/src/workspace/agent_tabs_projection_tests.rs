@@ -420,6 +420,14 @@ fn parse_claude_agent_tool_use_topology_reads_task_and_agent_tools() {
     assert_eq!(nodes[0].child_key, "toolu_01abc");
     assert_eq!(nodes[0].display_label, "Deep-dive webhook core");
     assert_eq!(nodes[0].status, AgentTabStatus::Working);
+    assert_eq!(
+        nodes[0].task_summary.as_deref(),
+        Some("Deep-dive webhook core")
+    );
+    assert_eq!(
+        nodes[0].activity.as_deref(),
+        Some("buscando en el código")
+    );
     assert_eq!(nodes[1].display_label, "Security pass");
 }
 
@@ -579,12 +587,24 @@ fn parent_rollup_secondary_lists_working_and_done() {
         .as_deref()
         .unwrap_or("")
         .contains("1 completado"));
-    // child keeps activity line
+    // child speaks like an agent (not bare status + raw activity scrap)
     let child_a = projection
         .nodes
         .iter()
         .find(|n| n.display_label == "a")
         .unwrap();
-    assert_eq!(child_a.ops_primary.as_deref(), Some("trabajando"));
-    assert_eq!(child_a.ops_secondary.as_deref(), Some("web"));
+    let primary = child_a.ops_primary.as_deref().unwrap_or("");
+    assert!(
+        primary.starts_with("Estoy"),
+        "expected agent voice, got {primary}"
+    );
+    assert!(
+        primary.contains("buscando") || primary.contains("trabajando en"),
+        "expected work content, got {primary}"
+    );
+    let secondary = child_a.ops_secondary.as_deref().unwrap_or("");
+    assert!(
+        secondary.starts_with("trabajando"),
+        "meta should be status facts, got {secondary}"
+    );
 }

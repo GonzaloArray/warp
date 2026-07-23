@@ -331,9 +331,23 @@ impl AgentTabsProjection {
                     },
                     None => root_id.clone(),
                 };
-                let activity_line = child.activity.clone().or_else(|| {
-                    child.last_event_ms.map(|ms| format_relative_event_ms(ms))
-                });
+                let display_label = sanitize_display_label(&child.display_label)
+                    .unwrap_or_else(|| "Subagent".to_string());
+                let relative = child.last_event_ms.map(format_relative_event_ms);
+                let voice = crate::workspace::agent_subagent_voice::SubagentVoice::compose(
+                    &crate::workspace::agent_subagent_voice::SubagentVoiceInput {
+                        status: child.status,
+                        display_label: display_label.clone(),
+                        task_summary: child.task_summary.clone(),
+                        activity: child.activity.clone(),
+                        result_summary: None,
+                        work_summary: None,
+                        elapsed_label: None,
+                        relative_event: relative,
+                        files_changed_count: 0,
+                        completion_flash: false,
+                    },
+                );
                 nodes.push(AgentTabNode {
                     id: child_id,
                     parent_id: Some(parent_id),
@@ -348,14 +362,14 @@ impl AgentTabsProjection {
                     has_children: child_has_kids.contains(&child.child_key),
                     descendants: AgentHierarchyCounts::default(),
                     external_provider: Some(session.provider),
-                    display_label: sanitize_display_label(&child.display_label)
-                        .unwrap_or_else(|| "Subagent".to_string()),
+                    display_label: voice.title.clone(),
                     profile_key: Some(format!(
                         "{}:{}",
                         session.terminal_view_id, child.child_key
                     )),
-                    ops_primary: Some(status_label_es(child.status).to_string()),
-                    ops_secondary: activity_line,
+                    // Agent-speaking primary; factual meta secondary (orchestrator glance).
+                    ops_primary: Some(voice.speaking.clone()),
+                    ops_secondary: Some(voice.meta.clone()),
                     needs_attention: matches!(
                         child.status,
                         AgentTabStatus::Blocked | AgentTabStatus::Failed | AgentTabStatus::Waiting
@@ -1235,20 +1249,57 @@ fn summarize_new_task(text: &str) -> String {
 }
 
 fn summarize_tool_call(name: &str, input: &str) -> String {
+    // Prefer verb phrases the voice layer can normalize; avoid dumping raw JSON.
     let input_l = input.to_ascii_lowercase();
-    if input_l.contains("web__run") || input_l.contains("web_search") || name.contains("web") {
-        return format!("{name} · buscando en la web");
+    let name_l = name.to_ascii_lowercase();
+    if input_l.contains("web__run")
+        || input_l.contains("web_search")
+        || name_l.contains("web")
+    {
+        return "buscando en la web".into();
     }
-    if input_l.contains("read_file") || input_l.contains("cat ") {
-        return format!("{name} · leyendo archivo");
+    if input_l.contains("read_file")
+        || input_l.contains("\"cat\"")
+        || name_l.contains("read")
+    {
+        return "leyendo archivos".into();
     }
-    if input_l.contains("write") || input_l.contains("apply_patch") {
-        return format!("{name} · modificando archivo");
+    if input_l.contains("apply_patch")
+        || input_l.contains("write_file")
+        || name_l.contains("edit")
+        || name_l.contains("write")
+    {
+        return "editando el repo".into();
     }
-    if input.len() > 80 {
-        format!("{name} · {}…", input.chars().take(60).collect::<String>())
-    } else if input.is_empty() {
-        format!("herramienta: {name}")
+    if name_l.contains("shell")
+        || name_l == "bash"
+        || name_l == "exec"
+        || input_l.contains("\"command\"")
+    {
+        // Best-effort short command extract without leaking full JSON.
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(input) {
+            if let Some(cmd) = v
+                .get("command")
+                .or_else(|| v.get("cmd"))
+                .and_then(|c| c.as_str())
+            {
+                let short = cmd.chars().take(48).collect::<String>();
+                return format!("shell · {short}");
+            }
+        }
+        return "shell · comando".into();
+    }
+    if input_l.contains("grep") || name_l.contains("grep") || name_l.contains("search") {
+        return "buscando en el código".into();
+    }
+    // Do not emit "herramienta: X · {json}" — unspeakable noise.
+    if input.trim_start().starts_with('{') {
+        return name.to_string();
+    }
+    if input.is_empty() {
+        name.to_string()
+    } else if input.len() > 80 {
+        format!("{name} · {}…", input.chars().take(48).collect::<String>())
     } else {
         format!("{name} · {input}")
     }
@@ -1426,10 +1477,34 @@ fn merge_claude_tool_use_subagents(
             let input = item.get("input").unwrap_or(&serde_json::Value::Null);
             let description = input
                 .get("description")
-                .or_else(|| input.get("name"))
+                .or_else(|| input.get("prompt"))
                 .and_then(|v| v.as_str())
-                .and_then(sanitize_display_label)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.chars().take(140).collect::<String>());
+            let name_label = input
+                .get("name")
+                .and_then(|v| v.as_str())
+                .and_then(sanitize_display_label);
+            let subagent_type = input
+                .get("subagent_type")
+                .or_else(|| input.get("subagentType"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            // Prefer description as human title (Claude Agent tool style), then name.
+            let display = description
+                .as_ref()
+                .and_then(|d| sanitize_display_label(&d.chars().take(48).collect::<String>()))
+                .or(name_label.clone())
                 .unwrap_or_else(|| "Subagent".to_string());
+            let task = description.clone().or(name_label);
+            let activity = subagent_type.map(|t| match t.to_ascii_lowercase().as_str() {
+                "explore" | "explore-agent" => "buscando en el código".to_string(),
+                "plan" | "planner" => "planificando".to_string(),
+                "general-purpose" | "general" => "trabajando en la tarea".to_string(),
+                other => format!("rol · {other}"),
+            });
             let child_key = item
                 .get("id")
                 .and_then(|v| v.as_str())
@@ -1442,25 +1517,36 @@ fn merge_claude_tool_use_subagents(
                         .filter(|key| is_safe_profile_key(key))
                         .map(str::to_owned)
                 })
-                .unwrap_or_else(|| format!("tool-{}", description.chars().take(24).collect::<String>()));
-            // Prefer an existing filesystem-based entry's status; only insert labels.
+                .unwrap_or_else(|| {
+                    format!(
+                        "tool-{}",
+                        display.chars().take(24).collect::<String>()
+                    )
+                });
+            // Prefer an existing filesystem-based entry's status; enrich labels/task.
             by_key
                 .entry(child_key.clone())
                 .and_modify(|node| {
                     if node.display_label == "Subagent" || node.display_label.starts_with("agent-")
                     {
-                        node.display_label = description.clone();
+                        node.display_label = display.clone();
+                    }
+                    if node.task_summary.is_none() {
+                        node.task_summary = task.clone();
+                    }
+                    if node.activity.is_none() {
+                        node.activity = activity.clone();
                     }
                 })
                 .or_insert(ExternalSubagentNode {
                     child_key,
-                    display_label: description,
+                    display_label: display,
                     status: AgentTabStatus::Working,
                     agent_path: None,
                     parent_child_key: None,
                     depth: 1,
-                    task_summary: None,
-                    activity: None,
+                    task_summary: task,
+                    activity,
                     last_event_ms: None,
                 });
         }

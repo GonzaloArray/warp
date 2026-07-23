@@ -659,18 +659,8 @@ fn render_codex_nav_column(
     for row in active {
         let selected = matches!(selection, ShellSelection::Active(k) if k == &row.child_key);
         let accent = status_color(row.status, row.completion_flash, theme);
-        let task = row
-            .task_summary
-            .as_ref()
-            .or(row.activity.as_ref())
-            .map(|s| truncate_ui(s, 48))
-            .unwrap_or_else(|| {
-                AgentUiProfile::status_chip(row.status, row.completion_flash).to_string()
-            });
-        let elapsed = row.elapsed_label.clone().unwrap_or_default();
-        let file_n = live
-            .iter()
-            .find(|c| c.child_key == row.child_key)
+        let live_child = live.iter().find(|c| c.child_key == row.child_key);
+        let file_n = live_child
             .map(|c| {
                 c.files_changed
                     .iter()
@@ -678,23 +668,29 @@ fn render_codex_nav_column(
                     .count()
             })
             .unwrap_or(0);
-        let mut meta = Vec::new();
-        if !elapsed.is_empty() {
-            meta.push(elapsed);
-        }
-        if file_n > 0 {
-            meta.push(format!(
-                "{file_n} archivo{}",
-                if file_n == 1 { "" } else { "s" }
-            ));
-        }
-        meta.push(task);
-        let subtitle = meta.join(" · ");
+        let voice = crate::workspace::agent_subagent_voice::SubagentVoice::compose(
+            &crate::workspace::agent_subagent_voice::SubagentVoiceInput {
+                status: row.status,
+                display_label: row.display_name.clone(),
+                task_summary: row
+                    .task_summary
+                    .clone()
+                    .or_else(|| live_child.and_then(|c| c.objective.clone())),
+                activity: row.activity.clone(),
+                result_summary: live_child.and_then(|c| c.result_summary.clone()),
+                work_summary: live_child.and_then(|c| c.work_summary.clone()),
+                elapsed_label: row.elapsed_label.clone(),
+                relative_event: None,
+                files_changed_count: file_n,
+                completion_flash: row.completion_flash,
+            },
+        );
+        let subtitle = truncate_ui(&voice.card_subtitle, 96);
         let ms = shell.row_mouse_state(&row.child_key);
         let key = row.child_key.clone();
         body = body.with_child(nav_card(
             ms,
-            row.display_name.clone(),
+            voice.title.clone(),
             subtitle,
             selected,
             accent,
@@ -1557,9 +1553,27 @@ fn render_codex_detail_column(
                 .finish(),
         );
     }
-    if let Some(act) = &detail.activity {
+    let detail_voice = crate::workspace::agent_subagent_voice::SubagentVoice::compose(
+        &crate::workspace::agent_subagent_voice::SubagentVoiceInput {
+            status: detail.status,
+            display_label: detail.display_name.clone(),
+            task_summary: detail.task_summary.clone(),
+            activity: detail.activity.clone(),
+            result_summary: detail.result_summary.clone(),
+            work_summary: None,
+            elapsed_label: detail.elapsed_label.clone(),
+            relative_event: None,
+            files_changed_count: detail
+                .files
+                .iter()
+                .filter(|f| !f.contains("No se realizaron") && !f.trim().is_empty())
+                .count(),
+            completion_flash: false,
+        },
+    );
+    if let Some(now) = &detail_voice.now_line {
         header_inner = header_inner.with_child(
-            Text::new_inline(format!("Ahora · {act}"), font, 11.)
+            Text::new_inline(format!("Ahora · {now}"), font, 11.)
                 .with_clip(ClipConfig::ellipsis())
                 .with_color(main.into())
                 .finish(),
@@ -1572,7 +1586,11 @@ fn render_codex_detail_column(
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
         .with_spacing(10.);
 
-    if let Some(task) = &detail.task_summary {
+    if let Some(task) = detail_voice
+        .objective
+        .as_ref()
+        .or(detail.task_summary.as_ref())
+    {
         sections = sections.with_child(detail_section(
             section_body("Objetivo", task, font, main, sub),
             theme.ansi_fg_blue(),
@@ -1668,7 +1686,11 @@ fn render_codex_detail_column(
         theme,
     ));
 
-    if let Some(result) = &detail.result_summary {
+    if let Some(result) = detail_voice
+        .outcome
+        .as_ref()
+        .or(detail.result_summary.as_ref())
+    {
         sections = sections.with_child(detail_section(
             section_body("Resultado", result, font, main, main),
             theme.ansi_fg_green(),
