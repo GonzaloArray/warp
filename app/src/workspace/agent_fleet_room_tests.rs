@@ -41,7 +41,10 @@ fn send_with_claude_mention_routes_only_claude() {
         .expect("plan");
     assert_eq!(plan.routes.len(), 1);
     assert_eq!(plan.routes[0].provider, AgentProviderId::Claude);
-    assert!(plan.routes[0].prompt.contains("arregl"));
+    assert!(
+        plan.routes[0].prompt.is_empty(),
+        "must not dump fleet text into shell argv"
+    );
     assert!(room.messages.iter().any(|m| m.kind == FleetMessageKind::User));
     assert!(room.messages.iter().any(|m| m.kind == FleetMessageKind::Route));
 }
@@ -50,19 +53,44 @@ fn send_with_claude_mention_routes_only_claude() {
 fn send_with_all_routes_ready_members() {
     let mut room = room_with_trio(true);
     let plan = room.send_user_message("@all revisar PR", 1).unwrap();
-    assert_eq!(plan.routes.len(), 3);
-    let mut providers: Vec<_> = plan.routes.iter().map(|r| r.provider).collect();
-    providers.sort();
-    assert!(providers.contains(&AgentProviderId::Claude));
-    assert!(providers.contains(&AgentProviderId::Codex));
-    assert!(providers.contains(&AgentProviderId::Grok));
+    // Cap parallel launches at 2 to avoid freezing Warp.
+    assert_eq!(plan.routes.len(), 2);
+    assert!(plan.routes.iter().all(|r| r.prompt.is_empty()));
+    assert!(room.messages.iter().any(|m| m.body.contains("Abrí solo")));
 }
 
 #[test]
-fn send_without_mention_defaults_to_ready() {
+fn send_without_mention_does_not_launch_all_clis() {
     let mut room = room_with_trio(true);
     let plan = room.send_user_message("explorar el repo", 1).unwrap();
-    assert_eq!(plan.routes.len(), 3);
+    assert!(
+        plan.routes.is_empty(),
+        "without @ must not open every CLI: {:?}",
+        plan.routes
+    );
+    assert!(room.messages.iter().any(|m| m.kind == FleetMessageKind::User));
+    assert!(room
+        .messages
+        .iter()
+        .any(|m| m.body.contains("Mensaje guardado") || m.body.contains("@claude")));
+}
+
+#[test]
+fn send_without_mention_uses_selected_member() {
+    let mut room = room_with_trio(true);
+    room.select_member(Some(AgentProviderId::Codex));
+    let plan = room.send_user_message("solo codex", 1).unwrap();
+    assert_eq!(plan.routes.len(), 1);
+    assert_eq!(plan.routes[0].provider, AgentProviderId::Codex);
+    assert!(plan.routes[0].prompt.is_empty());
+}
+
+#[test]
+fn all_caps_parallel_launches() {
+    let mut room = room_with_trio(true);
+    let plan = room.send_user_message("@all revisar", 1).unwrap();
+    assert!(plan.routes.len() <= 2);
+    assert!(plan.routes.iter().all(|r| r.prompt.is_empty()));
 }
 
 #[test]
@@ -86,26 +114,23 @@ fn disabled_or_missing_mention_not_targeted() {
 }
 
 #[test]
-fn welcome_seeds_one_agent_line_per_member() {
+fn welcome_is_single_system_blurb() {
     let mut room = room_with_trio(true);
     room.seed_welcome_if_needed(42);
     room.seed_welcome_if_needed(99); // idempotent
-    let agent_msgs = room
-        .messages
-        .iter()
-        .filter(|m| m.kind == FleetMessageKind::Agent)
-        .count();
-    assert_eq!(agent_msgs, 3);
-    assert!(room.messages.iter().any(|m| m.kind == FleetMessageKind::System));
+    assert_eq!(room.messages.len(), 1);
+    assert_eq!(room.messages[0].kind, FleetMessageKind::System);
+    assert!(room.messages[0].body.contains("mesa de control"));
 }
 
 #[test]
-fn launch_shell_for_route_quotes_prompt() {
-    let line = launch_shell_for_route(AgentProviderId::Claude, "fix tests");
-    assert!(line.starts_with("claude "));
-    assert!(line.contains("fix tests"));
+fn launch_shell_is_bare_binary() {
     assert_eq!(
-        launch_shell_for_route(AgentProviderId::Codex, ""),
+        launch_shell_for_route(AgentProviderId::Claude, "fix tests"),
+        "claude"
+    );
+    assert_eq!(
+        launch_shell_for_route(AgentProviderId::Codex, "anything"),
         "codex"
     );
 }

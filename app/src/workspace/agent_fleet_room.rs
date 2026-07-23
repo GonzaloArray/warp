@@ -134,36 +134,28 @@ impl FleetRoom {
             .sort_by_key(|m| provider_sort_key(m.provider));
     }
 
-    /// BLOOME-style intro lines once per room lifetime.
+    /// Short system intro once per room lifetime (no spam of fake agent hellos).
     pub(crate) fn seed_welcome_if_needed(&mut self, now_ms: u64) {
         if self.welcome_seeded || self.members.is_empty() {
             return;
         }
         self.welcome_seeded = true;
+        let roster = self
+            .members
+            .iter()
+            .map(|m| format!("@{}", mention_token(m.provider)))
+            .collect::<Vec<_>>()
+            .join(" ");
         self.push_message(
             FleetAuthor::System,
             FleetMessageKind::System,
-            "Sala multiagent local. Usá @claude @codex @grok o @all para dirigir el mensaje."
-                .into(),
-            now_ms,
-        );
-        for member in self.members.clone() {
-            let body = format!(
-                "Hola 👋 soy {}. Escribime con @{} en este grupo y trabajamos juntos.",
-                member.slot_label,
-                mention_token(member.provider)
-            );
-            self.push_message(
-                FleetAuthor::Provider(member.provider),
-                FleetMessageKind::Agent,
-                body,
-                now_ms,
-            );
-        }
-        self.push_message(
-            FleetAuthor::System,
-            FleetMessageKind::System,
-            "Definí el objetivo del loop y mencioná a quién querés en la tarea.".into(),
+            format!(
+                "Local Agents = mesa de control de CLIs (Claude, Codex, Grok…), no un chat de IA.\n\
+                 • Escribí @claude / @codex / @all + mensaje y Enviar → abre 1 tab por agent (CLI real).\n\
+                 • Sin @ no se abre nada: solo se guarda el mensaje acá.\n\
+                 • «Abrir CLI» en un member = solo ese terminal, vacío.\n\
+                 Disponibles: {roster}"
+            ),
             now_ms,
         );
     }
@@ -173,31 +165,15 @@ impl FleetRoom {
     }
 
     /// Parse draft, append user + route messages, return launch plan.
+    ///
+    /// Requires explicit `@mention` (or `@all`). Without mention we only keep
+    /// the note in the thread — never auto-open every CLI (that froze Warp and
+    /// confused users with N tabs full of the same text).
     pub(crate) fn send_user_message(&mut self, draft: &str, now_ms: u64) -> Option<FleetSendPlan> {
         let raw = draft.trim();
         if raw.is_empty() {
             return None;
         }
-        let targets = resolve_targets(raw, &self.members);
-        if targets.is_empty() {
-            self.push_message(
-                FleetAuthor::System,
-                FleetMessageKind::System,
-                "No hay agents listos para recibir el mensaje. Activá un provider o instalá su CLI."
-                    .into(),
-                now_ms,
-            );
-            return Some(FleetSendPlan {
-                routes: Vec::new(),
-                messages_appended: 1,
-            });
-        }
-        let prompt = strip_mentions(raw);
-        let prompt = if prompt.is_empty() {
-            raw.to_string()
-        } else {
-            prompt
-        };
 
         self.push_message(
             FleetAuthor::User,
@@ -206,34 +182,101 @@ impl FleetRoom {
             now_ms,
         );
 
+        let mentions = parse_mentions(raw);
+        if mentions.is_empty() {
+            // Prefer selected member as implicit single target.
+            if let Some(selected) = self.selected_provider {
+                if self.members.iter().any(|m| m.provider == selected && m.ready) {
+                    return Some(self.plan_routes(&[selected], now_ms, 1));
+                }
+            }
+            self.push_message(
+                FleetAuthor::System,
+                FleetMessageKind::System,
+                "Mensaje guardado en el hilo. Para abrir un CLI usá @claude, @codex, @all, \
+                 o seleccioná un member y reenviá."
+                    .into(),
+                now_ms,
+            );
+            return Some(FleetSendPlan {
+                routes: Vec::new(),
+                messages_appended: 2,
+            });
+        }
+
+        let targets = resolve_targets(raw, &self.members);
+        if targets.is_empty() {
+            self.push_message(
+                FleetAuthor::System,
+                FleetMessageKind::System,
+                "No hay agents listos para ese @. Instalá el CLI o activá el provider en Ajustes."
+                    .into(),
+                now_ms,
+            );
+            return Some(FleetSendPlan {
+                routes: Vec::new(),
+                messages_appended: 2,
+            });
+        }
+
+        // Cap fan-out: @all opening 6+ tabs freezes the UI.
+        const MAX_PARALLEL_LAUNCHES: usize = 2;
+        let total = targets.len();
+        let capped: Vec<_> = targets.into_iter().take(MAX_PARALLEL_LAUNCHES).collect();
+        let mut plan = self.plan_routes(&capped, now_ms, 1);
+        if total > MAX_PARALLEL_LAUNCHES {
+            self.push_message(
+                FleetAuthor::System,
+                FleetMessageKind::System,
+                format!(
+                    "Abrí solo {MAX_PARALLEL_LAUNCHES} terminals a la vez para no frezar Warp. \
+                     Volvé a mandar @all para los siguientes."
+                ),
+                now_ms,
+            );
+            plan.messages_appended += 1;
+        }
+        Some(plan)
+    }
+
+    fn plan_routes(
+        &mut self,
+        targets: &[AgentProviderId],
+        now_ms: u64,
+        messages_already: usize,
+    ) -> FleetSendPlan {
         let mut routes = Vec::new();
-        let mut appended = 1usize;
+        let mut appended = messages_already;
         for provider in targets {
             let label = self
                 .members
                 .iter()
-                .find(|m| m.provider == provider)
+                .find(|m| m.provider == *provider)
                 .map(|m| m.slot_label.clone())
                 .unwrap_or_else(|| provider.display_name().to_string());
             self.push_message(
                 FleetAuthor::System,
                 FleetMessageKind::Route,
-                format!("→ Enviando a {label}…"),
+                format!(
+                    "→ Abriendo terminal de {label}. El mensaje del hilo no se pega al shell \
+                     (escribilo vos en el CLI si hace falta)."
+                ),
                 now_ms,
             );
             appended += 1;
-            if let Some(m) = self.members.iter_mut().find(|m| m.provider == provider) {
+            if let Some(m) = self.members.iter_mut().find(|m| m.provider == *provider) {
                 m.status = FleetMemberStatus::Working;
             }
+            // Bare CLI only — no argv dump of the fleet message.
             routes.push(FleetRoute {
-                provider,
-                prompt: prompt.clone(),
+                provider: *provider,
+                prompt: String::new(),
             });
         }
-        Some(FleetSendPlan {
+        FleetSendPlan {
             routes,
             messages_appended: appended,
-        })
+        }
     }
 
     fn push_message(
@@ -352,7 +395,7 @@ fn resolve_targets(text: &str, members: &[FleetMember]) -> Vec<AgentProviderId> 
         .collect();
 
     if mentions.is_empty() {
-        return if !ready.is_empty() { ready } else { enabled };
+        return Vec::new();
     }
 
     let mut broadcast = false;
@@ -373,35 +416,11 @@ fn resolve_targets(text: &str, members: &[FleetMember]) -> Vec<AgentProviderId> 
     specific.into_iter().collect()
 }
 
-/// Shell line that starts the CLI with an optional initial prompt.
-/// Interactive-friendly: prefer bare CLI when prompt empty; else quote-safe append.
+/// Shell line that starts the provider CLI. Prefer bare binary — stuffing the
+/// fleet message as argv looked like “tabs full of text” and slowed startup.
 pub(crate) fn launch_shell_for_route(provider: AgentProviderId, prompt: &str) -> String {
-    let base = provider.launch_command();
-    let prompt = prompt.trim();
-    if prompt.is_empty() {
-        return base.to_string();
-    }
-    // Single-quoted shell string; strip quotes inside to avoid breakout.
-    let safe: String = prompt.chars().filter(|c| *c != '\'' && *c != '\n').collect();
-    let safe = if safe.chars().count() > 400 {
-        safe.chars().take(400).collect::<String>()
-    } else {
-        safe
-    };
-    match provider {
-        // Claude Code: trailing args often become the first user turn in interactive mode
-        // depending on version; still better than only opening empty shell.
-        AgentProviderId::Claude
-        | AgentProviderId::Codex
-        | AgentProviderId::Gemini
-        | AgentProviderId::Grok
-        | AgentProviderId::Hermes
-        | AgentProviderId::OpenCode
-        | AgentProviderId::Kimi
-        | AgentProviderId::MiniMax
-        | AgentProviderId::Cursor
-        | AgentProviderId::Copilot => format!("{base} '{safe}'"),
-    }
+    let _ = prompt; // reserved for future inject-into-running-session
+    provider.launch_command().to_string()
 }
 
 #[cfg(test)]
