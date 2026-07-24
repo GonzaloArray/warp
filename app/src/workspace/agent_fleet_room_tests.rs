@@ -42,8 +42,8 @@ fn send_with_claude_mention_routes_only_claude() {
     assert_eq!(plan.routes.len(), 1);
     assert_eq!(plan.routes[0].provider, AgentProviderId::Claude);
     assert!(
-        plan.routes[0].prompt.is_empty(),
-        "must not dump fleet text into shell argv"
+        plan.routes[0].prompt.contains("arregl"),
+        "native agent should receive the user prompt without @token"
     );
     assert!(room.messages.iter().any(|m| m.kind == FleetMessageKind::User));
     assert!(room.messages.iter().any(|m| m.kind == FleetMessageKind::Route));
@@ -55,24 +55,22 @@ fn send_with_all_routes_ready_members() {
     let plan = room.send_user_message("@all revisar PR", 1).unwrap();
     // Cap parallel launches at 2 to avoid freezing Warp.
     assert_eq!(plan.routes.len(), 2);
-    assert!(plan.routes.iter().all(|r| r.prompt.is_empty()));
+    assert!(plan.routes.iter().all(|r| r.prompt.contains("revisar")));
     assert!(room.messages.iter().any(|m| m.body.contains("Abrí solo")));
 }
 
 #[test]
-fn send_without_mention_does_not_launch_all_clis() {
+fn send_without_mention_opens_super_agent_not_all_clis() {
     let mut room = room_with_trio(true);
     let plan = room.send_user_message("explorar el repo", 1).unwrap();
-    assert!(
-        plan.routes.is_empty(),
-        "without @ must not open every CLI: {:?}",
-        plan.routes
-    );
+    assert!(plan.open_as_super_agent);
+    assert_eq!(plan.routes.len(), 1);
+    assert_eq!(plan.routes[0].prompt, "explorar el repo");
     assert!(room.messages.iter().any(|m| m.kind == FleetMessageKind::User));
     assert!(room
         .messages
         .iter()
-        .any(|m| m.body.contains("Mensaje guardado") || m.body.contains("@claude")));
+        .any(|m| m.body.contains("Super Agent")));
 }
 
 #[test]
@@ -82,7 +80,7 @@ fn send_without_mention_uses_selected_member() {
     let plan = room.send_user_message("solo codex", 1).unwrap();
     assert_eq!(plan.routes.len(), 1);
     assert_eq!(plan.routes[0].provider, AgentProviderId::Codex);
-    assert!(plan.routes[0].prompt.is_empty());
+    assert_eq!(plan.routes[0].prompt, "solo codex");
 }
 
 #[test]
@@ -90,7 +88,7 @@ fn all_caps_parallel_launches() {
     let mut room = room_with_trio(true);
     let plan = room.send_user_message("@all revisar", 1).unwrap();
     assert!(plan.routes.len() <= 2);
-    assert!(plan.routes.iter().all(|r| r.prompt.is_empty()));
+    assert!(plan.routes.iter().all(|r| r.prompt.contains("revisar")));
 }
 
 #[test]
@@ -120,7 +118,7 @@ fn welcome_is_single_system_blurb() {
     room.seed_welcome_if_needed(99); // idempotent
     assert_eq!(room.messages.len(), 1);
     assert_eq!(room.messages[0].kind, FleetMessageKind::System);
-    assert!(room.messages[0].body.contains("mesa de control"));
+    assert!(room.messages[0].body.contains("Super Agent"));
 }
 
 #[test]

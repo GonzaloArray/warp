@@ -57,11 +57,11 @@ pub(crate) struct FleetMessage {
     pub created_ms: u64,
 }
 
-/// One CLI launch/route requested by a send.
+/// One native (or CLI fallback) launch requested by a send.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct FleetRoute {
     pub provider: AgentProviderId,
-    /// User text with @tokens stripped (prompt to deliver).
+    /// User text with @tokens stripped (prompt for Agent Mode).
     pub prompt: String,
 }
 
@@ -69,6 +69,8 @@ pub(crate) struct FleetRoute {
 pub(crate) struct FleetSendPlan {
     pub routes: Vec<FleetRoute>,
     pub messages_appended: usize,
+    /// When true, open a single Super Agent conversation (switchable providers).
+    pub open_as_super_agent: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,11 +152,12 @@ impl FleetRoom {
             FleetAuthor::System,
             FleetMessageKind::System,
             format!(
-                "Local Agents = mesa de control de CLIs (Claude, Codex, Grok…), no un chat de IA.\n\
-                 • Escribí @claude / @codex / @all + mensaje y Enviar → abre 1 tab por agent (CLI real).\n\
-                 • Sin @ no se abre nada: solo se guarda el mensaje acá.\n\
-                 • «Abrir CLI» en un member = solo ese terminal, vacío.\n\
-                 Disponibles: {roster}"
+                "Local Agents = Super Agent multi-proveedor nativo de Warp.\n\
+                 • Enviar sin @ → Super Agent (Agent Mode, podés switchear Claude/Codex/Grok).\n\
+                 • @claude / @codex / @grok / @gemini + texto → Agent Mode en ese modelo.\n\
+                 • Chips Claude/Codex/Grok → cambian el modelo del agent activo (switch).\n\
+                 • @all = máx 2 conversaciones nativas.\n\
+                 Brands: {roster}"
             ),
             now_ms,
         );
@@ -184,23 +187,28 @@ impl FleetRoom {
 
         let mentions = parse_mentions(raw);
         if mentions.is_empty() {
-            // Prefer selected member as implicit single target.
+            // Prefer selected member; otherwise Super Agent (no brand → multi-connector).
             if let Some(selected) = self.selected_provider {
                 if self.members.iter().any(|m| m.provider == selected && m.ready) {
-                    return Some(self.plan_routes(&[selected], now_ms, 1));
+                    return Some(self.plan_routes(&[selected], raw, now_ms, 1));
                 }
             }
+            // Super Agent: empty provider list + special route via prompt-only path.
+            // Caller treats empty routes + super_agent_prompt as "open multi agent".
             self.push_message(
                 FleetAuthor::System,
-                FleetMessageKind::System,
-                "Mensaje guardado en el hilo. Para abrir un CLI usá @claude, @codex, @all, \
-                 o seleccioná un member y reenviá."
-                    .into(),
+                FleetMessageKind::Route,
+                "→ Abriendo Super Agent (multi Claude/Codex/Grok en Agent Mode)…".into(),
                 now_ms,
             );
             return Some(FleetSendPlan {
-                routes: Vec::new(),
+                routes: vec![FleetRoute {
+                    // Claude as default seat; Super Agent launch uses prompt + switch UI.
+                    provider: AgentProviderId::Claude,
+                    prompt: raw.to_string(),
+                }],
                 messages_appended: 2,
+                open_as_super_agent: true,
             });
         }
 
@@ -216,20 +224,22 @@ impl FleetRoom {
             return Some(FleetSendPlan {
                 routes: Vec::new(),
                 messages_appended: 2,
+                open_as_super_agent: false,
             });
         }
 
-        // Cap fan-out: @all opening 6+ tabs freezes the UI.
+        // Cap fan-out: @all opening 6+ agent tabs freezes the UI.
         const MAX_PARALLEL_LAUNCHES: usize = 2;
         let total = targets.len();
         let capped: Vec<_> = targets.into_iter().take(MAX_PARALLEL_LAUNCHES).collect();
-        let mut plan = self.plan_routes(&capped, now_ms, 1);
+        let prompt = strip_mentions(raw);
+        let mut plan = self.plan_routes(&capped, &prompt, now_ms, 1);
         if total > MAX_PARALLEL_LAUNCHES {
             self.push_message(
                 FleetAuthor::System,
                 FleetMessageKind::System,
                 format!(
-                    "Abrí solo {MAX_PARALLEL_LAUNCHES} terminals a la vez para no frezar Warp. \
+                    "Abrí solo {MAX_PARALLEL_LAUNCHES} agents a la vez para no frezar Warp. \
                      Volvé a mandar @all para los siguientes."
                 ),
                 now_ms,
@@ -242,6 +252,7 @@ impl FleetRoom {
     fn plan_routes(
         &mut self,
         targets: &[AgentProviderId],
+        prompt: &str,
         now_ms: u64,
         messages_already: usize,
     ) -> FleetSendPlan {
@@ -257,25 +268,22 @@ impl FleetRoom {
             self.push_message(
                 FleetAuthor::System,
                 FleetMessageKind::Route,
-                format!(
-                    "→ Abriendo terminal de {label}. El mensaje del hilo no se pega al shell \
-                     (escribilo vos en el CLI si hace falta)."
-                ),
+                format!("→ Agent Mode nativo · {label}…"),
                 now_ms,
             );
             appended += 1;
             if let Some(m) = self.members.iter_mut().find(|m| m.provider == *provider) {
                 m.status = FleetMemberStatus::Working;
             }
-            // Bare CLI only — no argv dump of the fleet message.
             routes.push(FleetRoute {
                 provider: *provider,
-                prompt: String::new(),
+                prompt: prompt.trim().to_string(),
             });
         }
         FleetSendPlan {
             routes,
             messages_appended: appended,
+            open_as_super_agent: false,
         }
     }
 

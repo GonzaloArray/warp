@@ -52,13 +52,26 @@ pub enum FleetRoomModalAction {
     Send,
     SelectMember(AgentProviderId),
     LaunchMember(AgentProviderId),
+    /// Switch model on the currently focused Agent Mode tab (no new tab).
+    SwitchMember(AgentProviderId),
+    /// One multi-connector Super Agent conversation.
+    OpenSuperAgent,
     InsertMention(String),
 }
 
 #[derive(Clone, Debug)]
 pub enum FleetRoomModalEvent {
     Close,
-    /// Workspace should launch this shell line in a new tab.
+    /// Open a **native** Warp Agent Mode conversation for this brand + prompt.
+    LaunchNativeAgent {
+        provider: AgentProviderId,
+        prompt: String,
+    },
+    /// Super Agent: Agent Mode with multi-provider switch seat.
+    LaunchSuperAgent { prompt: String },
+    /// Switch the model of the focused agent tab to this brand.
+    SwitchActiveAgentModel { provider: AgentProviderId },
+    /// Fallback: launch external CLI for brands without a native model path.
     LaunchShell { command: String },
 }
 
@@ -67,6 +80,8 @@ pub struct FleetRoomModal {
     composer: ViewHandle<EditorView>,
     close_ms: MouseStateHandle,
     send_ms: MouseStateHandle,
+    super_ms: MouseStateHandle,
+    switch_ms: Vec<MouseStateHandle>,
     mention_ms: Vec<MouseStateHandle>,
     member_ms: Vec<MouseStateHandle>,
     launch_ms: Vec<MouseStateHandle>,
@@ -87,7 +102,7 @@ impl FleetRoomModal {
                 },
                 ctx,
             );
-            editor.set_placeholder_text("Mensaje · @claude @codex @all…", ctx);
+            editor.set_placeholder_text("Preguntale al Super Agent · o @claude @codex @grok", ctx);
             editor
         });
         ctx.subscribe_to_view(&composer, |me, _, event, ctx| {
@@ -101,6 +116,8 @@ impl FleetRoomModal {
             composer,
             close_ms: MouseStateHandle::default(),
             send_ms: MouseStateHandle::default(),
+            super_ms: MouseStateHandle::default(),
+            switch_ms: (0..4).map(|_| MouseStateHandle::default()).collect(),
             mention_ms: (0..4).map(|_| MouseStateHandle::default()).collect(),
             member_ms: (0..12).map(|_| MouseStateHandle::default()).collect(),
             launch_ms: (0..12).map(|_| MouseStateHandle::default()).collect(),
@@ -109,6 +126,11 @@ impl FleetRoomModal {
 
     /// Refresh members from hub prefs + seed welcome when opening.
     pub fn prepare_open(&mut self, ctx: &mut ViewContext<Self>) {
+        use crate::ai::llms::LLMPreferences;
+        use crate::workspace::native_agent_provider::{
+            is_native_agent_provider, preferred_model_for_agent_provider,
+        };
+
         let prefs = AgentProviderHubPrefs::load_default();
         let enabled: Vec<AgentProviderId> = AgentProviderId::ALL
             .into_iter()
@@ -119,8 +141,15 @@ impl FleetRoomModal {
         } else {
             enabled
         };
+        let llm_prefs = LLMPreferences::as_ref(ctx);
+        // Native brands are "ready" when Agent Mode has a model for them.
+        // Others fall back to CLI on PATH.
         self.room.sync_members(enabled, |id| {
-            id.detect_commands().iter().any(|c| command_on_path(c))
+            if is_native_agent_provider(id) {
+                preferred_model_for_agent_provider(llm_prefs, id, ctx).is_some()
+            } else {
+                id.detect_commands().iter().any(|c| command_on_path(c))
+            }
         });
         let now_ms = now_ms();
         self.room.seed_welcome_if_needed(now_ms);
@@ -129,6 +158,8 @@ impl FleetRoomModal {
     }
 
     fn send(&mut self, ctx: &mut ViewContext<Self>) {
+        use crate::workspace::native_agent_provider::is_native_agent_provider;
+
         let draft = self.composer.as_ref(ctx).buffer_text(ctx);
         let Some(plan) = self.room.send_user_message(&draft, now_ms()) else {
             return;
@@ -136,10 +167,29 @@ impl FleetRoomModal {
         self.composer.update(ctx, |ed, ctx| {
             ed.set_buffer_text("", ctx);
         });
+        if plan.open_as_super_agent {
+            let prompt = plan
+                .routes
+                .first()
+                .map(|r| r.prompt.clone())
+                .unwrap_or_default();
+            ctx.emit(FleetRoomModalEvent::LaunchSuperAgent { prompt });
+            ctx.notify();
+            return;
+        }
         for route in plan.routes {
-            let command =
-                crate::workspace::agent_fleet_room::launch_shell_for_route(route.provider, &route.prompt);
-            ctx.emit(FleetRoomModalEvent::LaunchShell { command });
+            if is_native_agent_provider(route.provider) {
+                ctx.emit(FleetRoomModalEvent::LaunchNativeAgent {
+                    provider: route.provider,
+                    prompt: route.prompt,
+                });
+            } else {
+                let command = crate::workspace::agent_fleet_room::launch_shell_for_route(
+                    route.provider,
+                    &route.prompt,
+                );
+                ctx.emit(FleetRoomModalEvent::LaunchShell { command });
+            }
         }
         ctx.notify();
     }
@@ -292,13 +342,36 @@ impl View for FleetRoomModal {
                 ctx.dispatch_typed_action(FleetRoomModalAction::SelectMember(provider));
             })
             .finish();
-            members_col = members_col.with_child(row).with_child(chip(
-                "Abrir CLI",
-                lms,
-                FleetRoomModalAction::LaunchMember(provider),
-                font,
-                false,
-            ));
+            let open_label = if crate::workspace::native_agent_provider::is_native_agent_provider(
+                provider,
+            ) {
+                "Abrir nativo"
+            } else {
+                "Abrir CLI"
+            };
+            members_col = members_col.with_child(row).with_child(
+                Flex::row()
+                    .with_main_axis_size(MainAxisSize::Min)
+                    .with_spacing(4.)
+                    .with_child(chip(
+                        open_label,
+                        lms,
+                        FleetRoomModalAction::LaunchMember(provider),
+                        font,
+                        false,
+                    ))
+                    .with_child(chip(
+                        "Switch",
+                        self.switch_ms
+                            .get(i.min(self.switch_ms.len().saturating_sub(1)))
+                            .cloned()
+                            .unwrap_or_default(),
+                        FleetRoomModalAction::SwitchMember(provider),
+                        font,
+                        false,
+                    ))
+                    .finish(),
+            );
         }
 
         let mut thread = Flex::column()
@@ -307,9 +380,13 @@ impl View for FleetRoomModal {
             .with_spacing(6.);
         if self.room.messages.is_empty() {
             thread = thread.with_child(
-                Text::new_inline("Sin mensajes. Usá @claude @codex @all…", font, 12.)
-                    .with_color(sub)
-                    .finish(),
+                Text::new_inline(
+                    "Escribí y Enviar → Super Agent. O @claude / @codex / @grok.",
+                    font,
+                    12.,
+                )
+                .with_color(sub)
+                .finish(),
             );
         }
         let start = self.room.messages.len().saturating_sub(16);
@@ -328,6 +405,34 @@ impl View for FleetRoomModal {
         .with_width(content_w - 100.)
         .with_height(40.)
         .finish();
+
+        let switch_brands = [
+            (AgentProviderId::Claude, "→ Claude"),
+            (AgentProviderId::Codex, "→ Codex"),
+            (AgentProviderId::Grok, "→ Grok"),
+            (AgentProviderId::Gemini, "→ Gemini"),
+        ];
+        let mut switch_row = Flex::row()
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_spacing(6.)
+            .with_child(chip(
+                "★ Super Agent",
+                self.super_ms.clone(),
+                FleetRoomModalAction::OpenSuperAgent,
+                font,
+                true,
+            ));
+        for (i, (brand, label)) in switch_brands.iter().enumerate() {
+            let ms = self.switch_ms.get(i).cloned().unwrap_or_default();
+            let brand = *brand;
+            switch_row = switch_row.with_child(chip(
+                label,
+                ms,
+                FleetRoomModalAction::SwitchMember(brand),
+                font,
+                false,
+            ));
+        }
 
         let mentions = [
             ("@all", "all"),
@@ -352,6 +457,7 @@ impl View for FleetRoomModal {
         let composer_row = Flex::column()
             .with_main_axis_size(MainAxisSize::Min)
             .with_spacing(8.)
+            .with_child(switch_row.finish())
             .with_child(mention_row.finish())
             .with_child(
                 Flex::row()
@@ -369,9 +475,13 @@ impl View for FleetRoomModal {
                     .finish(),
             )
             .with_child(
-                Text::new_inline("Enviar lanza CLIs reales en tabs nuevos.", font, 10.)
-                    .with_color(sub)
-                    .finish(),
+                Text::new_inline(
+                    "Super Agent = 1 conversación nativa. Switch cambia Claude/Codex/Grok en el tab activo.",
+                    font,
+                    10.,
+                )
+                .with_color(sub)
+                .finish(),
             )
             .finish();
 
@@ -461,8 +571,25 @@ impl TypedActionView for FleetRoomModal {
                 ctx.notify();
             }
             FleetRoomModalAction::LaunchMember(p) => {
-                let command = p.launch_shell_line(AgentProviderLaunchMode::NewSession);
-                ctx.emit(FleetRoomModalEvent::LaunchShell { command });
+                use crate::workspace::native_agent_provider::is_native_agent_provider;
+                if is_native_agent_provider(*p) {
+                    ctx.emit(FleetRoomModalEvent::LaunchNativeAgent {
+                        provider: *p,
+                        prompt: String::new(),
+                    });
+                } else {
+                    let command = p.launch_shell_line(AgentProviderLaunchMode::NewSession);
+                    ctx.emit(FleetRoomModalEvent::LaunchShell { command });
+                }
+            }
+            FleetRoomModalAction::SwitchMember(p) => {
+                ctx.emit(FleetRoomModalEvent::SwitchActiveAgentModel { provider: *p });
+            }
+            FleetRoomModalAction::OpenSuperAgent => {
+                let draft = self.composer.as_ref(ctx).buffer_text(ctx);
+                ctx.emit(FleetRoomModalEvent::LaunchSuperAgent {
+                    prompt: draft.trim().to_string(),
+                });
             }
             FleetRoomModalAction::InsertMention(token) => {
                 self.insert_mention(token, ctx);

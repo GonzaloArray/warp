@@ -7,6 +7,7 @@ pub(crate) mod agent_screen_evidence;
 pub(crate) mod agent_subagent_voice;
 pub(crate) mod agent_fleet_room;
 pub(crate) mod agent_fleet_room_ui;
+pub(crate) mod native_agent_provider;
 pub(crate) mod agent_project;
 pub(crate) mod agent_provider_hub;
 pub mod agent_tabs_projection;

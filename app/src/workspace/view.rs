@@ -7072,11 +7072,11 @@ impl Workspace {
                 }
             }
             menu_items.push(
-                MenuItemFields::new("Local Agents · Sala multiagent")
+                MenuItemFields::new("Local Agents · Super Agent multi")
                     .with_on_select_action(WorkspaceAction::OpenFleetRoom)
                     .with_icon(icons::Icon::AiAssistant)
                     .with_tooltip(
-                        "Grupo multiagent: un hilo, @claude @codex @grok, CLIs reales en tabs.",
+                        "Super Agent nativo Claude/Codex/Grok con switch de modelo en Agent Mode.",
                     )
                     .into_item(),
             );
@@ -8476,10 +8476,166 @@ impl Workspace {
                 self.fleet_room_open = false;
                 ctx.notify();
             }
+            FleetRoomModalEvent::LaunchNativeAgent { provider, prompt } => {
+                self.launch_native_agent_provider(*provider, prompt.clone(), false, ctx);
+            }
+            FleetRoomModalEvent::LaunchSuperAgent { prompt } => {
+                self.launch_super_agent(prompt.clone(), ctx);
+            }
+            FleetRoomModalEvent::SwitchActiveAgentModel { provider } => {
+                self.switch_active_agent_to_provider(*provider, ctx);
+            }
             FleetRoomModalEvent::LaunchShell { command } => {
                 self.launch_shell_command_in_new_tab(command, ctx);
             }
         }
+    }
+
+    /// Super Agent: one native Agent Mode conversation that the user can
+    /// switch between Claude / Codex / Grok (multi-connector seat).
+    fn launch_super_agent(&mut self, prompt: String, ctx: &mut ViewContext<Self>) {
+        use crate::workspace::agent_provider_hub::AgentProviderId;
+        use crate::workspace::native_agent_provider::preferred_model_for_agent_provider;
+        use crate::ai::llms::LLMPreferences;
+
+        // Prefer Claude seat if available, else Codex, else Grok, else any.
+        let start_provider = {
+            let prefs = LLMPreferences::as_ref(ctx);
+            [
+                AgentProviderId::Claude,
+                AgentProviderId::Codex,
+                AgentProviderId::Grok,
+                AgentProviderId::Gemini,
+            ]
+            .into_iter()
+            .find(|p| preferred_model_for_agent_provider(prefs, *p, ctx).is_some())
+            .unwrap_or(AgentProviderId::Claude)
+        };
+
+        let intro = if prompt.trim().is_empty() {
+            "Sos el Super Agent multi-proveedor de Warp. El usuario puede cambiar entre Claude (Anthropic), Codex (OpenAI) y Grok (xAI) con Local Agents → Switch o el model picker. Respondé en el modelo actual y sé explícito si una tarea conviene a otro modelo.".to_string()
+        } else {
+            format!(
+                "[Super Agent · multi Claude/Codex/Grok — el usuario puede switchear modelo]\n\n{prompt}"
+            )
+        };
+        self.launch_native_agent_provider(start_provider, intro, true, ctx);
+    }
+
+    /// Switch the focused Agent Mode tab to a brand's native model (no new tab).
+    fn switch_active_agent_to_provider(
+        &mut self,
+        provider: crate::workspace::agent_provider_hub::AgentProviderId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        use crate::ai::llms::LLMPreferences;
+        use crate::workspace::native_agent_provider::preferred_model_for_agent_provider;
+
+        let Some(terminal_view) = self
+            .active_tab_pane_group()
+            .as_ref(ctx)
+            .active_session_view(ctx)
+        else {
+            // No agent open → open native with empty prompt.
+            self.launch_native_agent_provider(provider, String::new(), false, ctx);
+            return;
+        };
+
+        let model_id = {
+            let prefs = LLMPreferences::as_ref(ctx);
+            preferred_model_for_agent_provider(prefs, provider, ctx).map(|i| i.id.clone())
+        };
+        let Some(model_id) = model_id else {
+            log::warn!(
+                "No model to switch for {}",
+                provider.display_name()
+            );
+            return;
+        };
+
+        let surface = terminal_view.id();
+        LLMPreferences::handle(ctx).update(ctx, |prefs, ctx| {
+            prefs.update_preferred_agent_mode_llm(&model_id, surface, ctx);
+        });
+        self.fleet_room_open = false;
+        ctx.focus(&terminal_view);
+        ctx.notify();
+    }
+
+    /// Open a Warp **Agent Mode** conversation with the brand's native model
+    /// (Claude→Anthropic, Codex→preferred codex / OpenAI, Grok→xAI, …).
+    /// Same path as the official Codex modal — not a CLI shell tab.
+    fn launch_native_agent_provider(
+        &mut self,
+        provider: crate::workspace::agent_provider_hub::AgentProviderId,
+        prompt: String,
+        _super_agent: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        use crate::ai::execution_profiles::profiles::AIExecutionProfilesModel;
+        use crate::ai::llms::LLMPreferences;
+        use crate::workspace::native_agent_provider::preferred_model_for_agent_provider;
+
+        let model_id = {
+            let prefs = LLMPreferences::as_ref(ctx);
+            preferred_model_for_agent_provider(prefs, provider, ctx).map(|info| info.id.clone())
+        };
+
+        let Some(model_id) = model_id else {
+            log::warn!(
+                "No native Agent Mode model for {}; falling back to CLI launch",
+                provider.display_name()
+            );
+            let cmd = crate::workspace::agent_fleet_room::launch_shell_for_route(provider, &prompt);
+            self.launch_shell_command_in_new_tab(&cmd, ctx);
+            return;
+        };
+
+        // Close the fleet modal so the new agent tab is visible.
+        self.fleet_room_open = false;
+
+        self.add_new_session_tab_internal_with_default_session_mode_behavior(
+            NewSessionSource::Tab,
+            Some(ctx.window_id()),
+            None,
+            None,
+            false,
+            DefaultSessionModeBehavior::Ignore,
+            ctx,
+        );
+
+        let Some(terminal_view) = self
+            .active_tab_pane_group()
+            .as_ref(ctx)
+            .active_session_view(ctx)
+        else {
+            report_error!("No active terminal after Local Agents native launch");
+            return;
+        };
+
+        AIExecutionProfilesModel::handle(ctx).update(ctx, |profiles, ctx| {
+            let default_profile_id = profiles.default_profile_id();
+            profiles.set_base_model(default_profile_id, Some(model_id.clone()), ctx);
+            profiles.set_active_profile(terminal_view.id(), default_profile_id, ctx);
+        });
+        // Pane-level override so switch works independently of profile default.
+        LLMPreferences::handle(ctx).update(ctx, |prefs, ctx| {
+            prefs.update_preferred_agent_mode_llm(&model_id, terminal_view.id(), ctx);
+        });
+
+        let initial = if prompt.trim().is_empty() {
+            None
+        } else {
+            Some(prompt)
+        };
+        terminal_view.update(ctx, |terminal_view, ctx| {
+            terminal_view.enter_agent_view_for_new_conversation(
+                initial,
+                AgentViewEntryOrigin::ConversationListView,
+                ctx,
+            );
+        });
+        ctx.notify();
     }
 
     fn set_agent_provider_enabled(
