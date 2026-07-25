@@ -143,6 +143,10 @@ pub enum WindowStyle {
     /// Position the window at exact bounds and show it, but don't make it key (no focus steal).
     /// Used for drag preview windows that should appear but not interrupt the drag.
     PositionedNoFocus,
+
+    /// Floating always-on-top panel that the user can freely drag (desktop pet / companion).
+    /// Unlike [`Pin`], the window remains movable and does not force app activation.
+    FloatingMovable,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug, Default)]

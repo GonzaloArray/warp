@@ -778,6 +778,28 @@ pub enum WorkspaceAction {
     ToggleNotificationMailbox {
         select_first: bool,
     },
+    /// Open/close the CLI agent monitor panel (Claude / Codex / Grok ADHD review).
+    ToggleCliAgentMonitor,
+    /// Activate (focus) a monitored CLI agent session by id.
+    ActivateCliAgentMonitorSession {
+        session_id: String,
+    },
+    /// Explicit “Marcar como revisado” when the terminal no longer exists.
+    MarkCliAgentMonitorReviewed {
+        session_id: String,
+    },
+    /// Remove one monitor row (panel “Quitar”) without requiring review.
+    RemoveCliAgentMonitorSession {
+        session_id: String,
+    },
+    /// Clear every monitor row + pet bubble.
+    ClearCliAgentMonitor,
+    /// Hide the Sumanos floating pet (monitor keeps running).
+    CloseCliAgentPet,
+    /// Show the Sumanos floating pet again from the status bar.
+    ShowCliAgentPet,
+    /// Minimize pet to status-bar-only.
+    MinimizeCliAgentPet,
     ToggleAgentManagementView,
     ViewAgentRunsForEnvironment {
         environment_id: String,
@@ -1166,6 +1188,14 @@ impl WorkspaceAction {
             | ToggleConversationListView
             | OpenConversationListView
             | ToggleNotificationMailbox { .. }
+            | ToggleCliAgentMonitor
+            | ActivateCliAgentMonitorSession { .. }
+            | MarkCliAgentMonitorReviewed { .. }
+            | RemoveCliAgentMonitorSession { .. }
+            | ClearCliAgentMonitor
+            | CloseCliAgentPet
+            | ShowCliAgentPet
+            | MinimizeCliAgentPet
             | ToggleAgentManagementView
             | OpenAgentManagementView
             | ViewAgentRunsForEnvironment { .. }

@@ -95,6 +95,14 @@ const ANTIGRAVITY_COLOR: ColorU = ColorU {
     a: 255,
 };
 
+/// Grok brand color (near-black)
+const GROK_COLOR: ColorU = ColorU {
+    r: 26,
+    g: 26,
+    b: 26,
+    a: 255,
+};
+
 /// Auggie brand color (white, monochrome logo)
 const AUGGIE_COLOR: ColorU = ColorU {
     r: 255,
@@ -153,6 +161,7 @@ pub enum CLIAgent {
     Hermes,
     Vibe,
     Antigravity,
+    Grok,
     /// Represents an unknown/custom CLI agent matched by user-configured regex patterns.
     Unknown,
 }
@@ -176,6 +185,7 @@ impl CLIAgent {
             CLIAgent::Hermes => "hermes",
             CLIAgent::Vibe => "vibe",
             CLIAgent::Antigravity => "agy",
+            CLIAgent::Grok => "grok",
             CLIAgent::Unknown => "",
         }
     }
@@ -225,6 +235,7 @@ impl CLIAgent {
             CLIAgent::Hermes => "Hermes",
             CLIAgent::Vibe => "Mistral Vibe",
             CLIAgent::Antigravity => "Antigravity",
+            CLIAgent::Grok => "Grok",
             CLIAgent::Unknown => "CLI Agent",
         }
     }
@@ -250,6 +261,7 @@ impl CLIAgent {
             // up in a follow-up once an officially licensed SVG is available.
             CLIAgent::Vibe => None,
             CLIAgent::Antigravity => Some(Icon::AntigravityLogo),
+            CLIAgent::Grok => None,
             CLIAgent::Unknown => None,
         }
     }
@@ -282,6 +294,7 @@ impl CLIAgent {
             CLIAgent::Hermes => &[SkillProvider::Agents],
             CLIAgent::Vibe => &[SkillProvider::Agents],
             CLIAgent::Antigravity => &[],
+            CLIAgent::Grok => &[],
             CLIAgent::Unknown => &[],
         }
     }
@@ -326,6 +339,7 @@ impl CLIAgent {
             CLIAgent::Hermes => Some(HERMES_PURPLE),
             CLIAgent::Vibe => Some(MISTRAL_ORANGE),
             CLIAgent::Antigravity => Some(ANTIGRAVITY_COLOR),
+            CLIAgent::Grok => Some(GROK_COLOR),
             CLIAgent::Unknown => None,
         }
     }
@@ -619,6 +633,7 @@ impl From<CLIAgent> for CLIAgentType {
             CLIAgent::Hermes => CLIAgentType::Hermes,
             CLIAgent::Vibe => CLIAgentType::Vibe,
             CLIAgent::Antigravity => CLIAgentType::Antigravity,
+            CLIAgent::Grok => CLIAgentType::Grok,
             CLIAgent::Unknown => CLIAgentType::Unknown,
         }
     }

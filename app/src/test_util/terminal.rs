@@ -14,6 +14,7 @@ use watcher::HomeDirectoryWatcher;
 use super::settings::initialize_history_persistence_for_tests;
 use crate::ai::AIRequestUsageModel;
 use crate::ai::active_agent_views_model::ActiveAgentViewsModel;
+use crate::terminal::cli_agent_monitor::CliAgentMonitorModel;
 use crate::ai::agent_conversations_model::AgentConversationsModel;
 use crate::ai::agent_tips::AITipModel;
 use crate::ai::ambient_agents::github_auth_notifier::GitHubAuthNotifier;
@@ -112,6 +113,10 @@ pub fn initialize_app_for_terminal_view(app: &mut App) {
     // history model is in place.
     app.add_singleton_model(|ctx| OrchestrationPillBarModel::new(Default::default(), ctx));
     app.add_singleton_model(|_| CLIAgentSessionsModel::new());
+    app.add_singleton_model(|_| CliAgentMonitorModel::new());
+    app.add_singleton_model(|_| {
+        crate::terminal::cli_agent_monitor::DesktopPetWindowRegistry::new()
+    });
     app.add_singleton_model(OrchestrationEventService::new);
     app.add_singleton_model(LocalAgentTaskSyncModel::new);
     app.add_singleton_model(OrchestrationEventStreamer::new);

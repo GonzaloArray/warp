@@ -41,6 +41,7 @@ use crate::server::sync_queue::SyncQueue;
 use crate::server::voice_transcriber::ServerVoiceTranscriber;
 use crate::settings::manager::SettingsManager;
 use crate::settings::{AISettings, PrivacySettings, init_and_register_user_preferences};
+use crate::terminal::cli_agent_monitor::CliAgentMonitorModel;
 use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
 use crate::user_config::WarpConfig;
 #[cfg(feature = "voice_input")]
@@ -141,6 +142,10 @@ pub fn register_tui_session_view_test_singletons(app: &mut warpui::App) {
     app.add_singleton_model(|_| BlocklistAIHistoryModel::default());
     app.add_singleton_model(QueuedQueryModel::new);
     app.add_singleton_model(|_| CLIAgentSessionsModel::new());
+    app.add_singleton_model(|_| CliAgentMonitorModel::new());
+    app.add_singleton_model(|_| {
+        crate::terminal::cli_agent_monitor::DesktopPetWindowRegistry::new()
+    });
     app.add_singleton_model(OrchestrationEventService::new);
     app.add_singleton_model(LocalAgentTaskSyncModel::new);
     app.add_singleton_model(OrchestrationEventStreamer::new);

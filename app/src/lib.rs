@@ -308,6 +308,7 @@ use crate::settings_view::DisplayCount;
 use crate::settings_view::keybindings::KeybindingChangedNotifier;
 use crate::suggestions::ignored_suggestions_model::IgnoredSuggestionsModel;
 use crate::system::SystemStats;
+use crate::terminal::cli_agent_monitor::{CliAgentMonitorModel, DesktopPetWindowRegistry};
 use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
 use crate::terminal::keys::TerminalKeybindings;
 use crate::terminal::resizable_data::ResizableData;
@@ -1818,11 +1819,15 @@ pub(crate) fn initialize_app(
             });
 
             for window_id in ctx.window_ids().collect_vec() {
-                SettingsPaneManager::handle(ctx)
-                    .read(ctx, |model, _| model.settings_view(window_id))
-                    .update(ctx, |settings, ctx| {
-                        settings.refresh_preferred_graphics_backend_dropdown(ctx);
-                    })
+                // Skip auxiliary windows (desktop pet, etc.) that have no settings pane.
+                let Some(settings_view) = SettingsPaneManager::handle(ctx)
+                    .read(ctx, |model, _| model.try_settings_view(window_id))
+                else {
+                    continue;
+                };
+                settings_view.update(ctx, |settings, ctx| {
+                    settings.refresh_preferred_graphics_backend_dropdown(ctx);
+                });
             }
 
             send_telemetry_from_app_ctx!(event, ctx);
@@ -2116,6 +2121,8 @@ pub(crate) fn initialize_app(
     // loads metadata.
     ctx.add_singleton_model(|_| RestoredAgentConversations::new());
     ctx.add_singleton_model(|_| CLIAgentSessionsModel::new());
+    ctx.add_singleton_model(|_| CliAgentMonitorModel::new());
+    ctx.add_singleton_model(|_| DesktopPetWindowRegistry::new());
     // ActiveAgentViewsModel is used to track active agent conversations and notify listeners when they change.
     ctx.add_singleton_model(|_| ActiveAgentViewsModel::new());
     ctx.add_singleton_model(AgentNotificationsModel::new);
@@ -2707,27 +2714,51 @@ pub(crate) fn app_callbacks(
             if let Some(notification_data) = notification_response.data() {
                 let context: serde_json::Result<NotificationContext> =
                     serde_json::from_str(notification_data);
-                if let Ok(NotificationContext::BlockOrigin {
-                    window_id,
-                    pane_group_id,
-                    pane_id,
-                }) = context
-                {
-                    // Ensure the window ID exists, if so dispatch an action to focus
-                    // the correct pane.
-                    if ctx.window_ids().contains(&window_id)
-                        && let Some(root_view_id) = ctx.root_view_id(window_id)
-                    {
-                        ctx.dispatch_action(
-                            window_id,
-                            &[root_view_id],
-                            "root_view:handle_notification_click",
-                            &PaneViewLocator {
-                                pane_group_id,
-                                pane_id,
-                            },
-                            log::Level::Info,
+                match context {
+                    Ok(NotificationContext::BlockOrigin {
+                        window_id,
+                        pane_group_id,
+                        pane_id,
+                    }) => {
+                        // Ensure the window ID exists, if so dispatch an action to focus
+                        // the correct pane.
+                        if ctx.window_ids().contains(&window_id)
+                            && let Some(root_view_id) = ctx.root_view_id(window_id)
+                        {
+                            ctx.dispatch_action(
+                                window_id,
+                                &[root_view_id],
+                                "root_view:handle_notification_click",
+                                &PaneViewLocator {
+                                    pane_group_id,
+                                    pane_id,
+                                },
+                                log::Level::Info,
+                            );
+                        }
+                    }
+                    Ok(NotificationContext::CliAgentMonitor { session_id }) => {
+                        log::info!(
+                            "CLI agent monitor notification clicked for session {session_id}"
                         );
+                        use crate::workspace::{WorkspaceAction, WorkspaceRegistry};
+                        use warpui::TypedActionView;
+                        let workspaces = WorkspaceRegistry::as_ref(ctx).all_workspaces(ctx);
+                        for (_window_id, workspace) in workspaces {
+                            workspace.update(ctx, |ws, ctx| {
+                                TypedActionView::handle_action(
+                                    ws,
+                                    &WorkspaceAction::ActivateCliAgentMonitorSession {
+                                        session_id: session_id.clone(),
+                                    },
+                                    ctx,
+                                );
+                            });
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        log::warn!("Failed to parse notification context: {err}");
                     }
                 }
             }

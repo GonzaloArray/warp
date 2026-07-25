@@ -573,6 +573,19 @@ impl Window {
                         let _: () = msg_send![panel, positionPinnedPanel];
                         panel
                     }
+                    WindowStyle::FloatingMovable => {
+                        let panel = create_warp_nspanel(
+                            frame,
+                            metal_device_ptr,
+                            Bool::new(options.hide_title_bar),
+                            background_blur_radius_pixels,
+                            Bool::new(test_mode),
+                        );
+                        // Freely draggable desktop companion (pet): float above apps,
+                        // but keep movable and drag-by-background.
+                        let _: () = msg_send![panel, positionFloatingMovablePanel];
+                        panel
+                    }
                     _ => create_warp_nswindow(
                         frame,
                         metal_device_ptr,
@@ -646,7 +659,7 @@ impl Window {
             // SAFETY: these call into the hand-written Objective-C positioning helpers.
             unsafe {
                 match options.style {
-                    WindowStyle::Normal | WindowStyle::Pin => {
+                    WindowStyle::Normal | WindowStyle::Pin | WindowStyle::FloatingMovable => {
                         match options.bounds {
                             WindowBounds::ExactPosition(_) => {
                                 // If specfied, we should set the window to the exact position.

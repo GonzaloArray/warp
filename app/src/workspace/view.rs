@@ -177,6 +177,12 @@ use crate::ai::agent_management::notifications::toast_stack::AgentNotificationTo
 use crate::ai::agent_management::notifications::view::{
     NotificationMailboxView, NotificationMailboxViewEvent,
 };
+use crate::terminal::cli_agent_monitor::{
+    CliAgentAvatarToastEvent, CliAgentAvatarToastStack, CliAgentMonitorEvent,
+    CliAgentMonitorModel, CliAgentMonitorPanelEvent, CliAgentMonitorPanelView, PetMode,
+    avatar_toast_positioning, close_desktop_pet_window, compact_indicator_from_store,
+    ensure_desktop_pet_window, parse_terminal_view_id, sync_desktop_pet_window_to_mode,
+};
 use crate::ai::agent_management::telemetry::AgentManagementTelemetryEvent;
 use crate::ai::agent_management::view::{AgentManagementView, AgentManagementViewEvent};
 #[cfg(not(target_family = "wasm"))]
@@ -635,6 +641,7 @@ pub const TOGGLE_COMMAND_PALETTE_KEYBINDING_NAME: &str = "workspace:toggle_comma
 
 const USER_AVATAR_BUTTON_POSITION_ID: &str = "workspace:user_avatar_button";
 const NOTIFICATIONS_MAILBOX_POSITION_ID: &str = "workspace:notifications_mailbox";
+const CLI_AGENT_MONITOR_POSITION_ID: &str = "workspace:cli_agent_monitor";
 pub(crate) const JUMP_TO_LATEST_TOAST_BINDING_NAME: &str = "workspace:jump_to_latest_toast";
 pub(crate) const TOGGLE_NOTIFICATION_MAILBOX_BINDING_NAME: &str =
     "workspace:toggle_notification_mailbox";
@@ -1160,6 +1167,8 @@ pub struct Workspace {
     working_directories_model: ModelHandle<pane_group::WorkingDirectoriesModel>,
     agent_management_view: ViewHandle<AgentManagementView>,
     notification_mailbox_view: Option<ViewHandle<NotificationMailboxView>>,
+    cli_agent_monitor_panel: ViewHandle<CliAgentMonitorPanelView>,
+    cli_agent_avatar_toast: ViewHandle<CliAgentAvatarToastStack>,
     notification_toast_stack: Option<ViewHandle<AgentNotificationToastStack>>,
     lightbox_view: Option<ViewHandle<LightboxView>>,
     hoa_onboarding_flow: Option<ViewHandle<HoaOnboardingFlow>>,
@@ -3123,6 +3132,84 @@ impl Workspace {
             None
         };
 
+        let cli_agent_monitor_panel =
+            ctx.add_typed_action_view(|_ctx| CliAgentMonitorPanelView::new());
+        ctx.subscribe_to_view(&cli_agent_monitor_panel, |me, _, event, ctx| match event {
+            CliAgentMonitorPanelEvent::ActivateSession { session_id } => {
+                me.handle_action(
+                    &WorkspaceAction::ActivateCliAgentMonitorSession {
+                        session_id: session_id.clone(),
+                    },
+                    ctx,
+                );
+            }
+            CliAgentMonitorPanelEvent::MarkReviewed { session_id } => {
+                me.handle_action(
+                    &WorkspaceAction::MarkCliAgentMonitorReviewed {
+                        session_id: session_id.clone(),
+                    },
+                    ctx,
+                );
+            }
+            CliAgentMonitorPanelEvent::RemoveSession { session_id } => {
+                me.handle_action(
+                    &WorkspaceAction::RemoveCliAgentMonitorSession {
+                        session_id: session_id.clone(),
+                    },
+                    ctx,
+                );
+            }
+            CliAgentMonitorPanelEvent::ClearAll => {
+                me.handle_action(&WorkspaceAction::ClearCliAgentMonitor, ctx);
+            }
+            CliAgentMonitorPanelEvent::ShowPet => {
+                me.handle_action(&WorkspaceAction::ShowCliAgentPet, ctx);
+            }
+            CliAgentMonitorPanelEvent::HidePet => {
+                me.handle_action(&WorkspaceAction::CloseCliAgentPet, ctx);
+            }
+            CliAgentMonitorPanelEvent::ToggleDesktopAlerts => {
+                CliAgentMonitorModel::handle(ctx).update(ctx, |m, ctx| {
+                    let next = !m.alerts().desktop_enabled;
+                    m.set_desktop_alerts_enabled(next, ctx);
+                });
+                ctx.notify();
+            }
+            CliAgentMonitorPanelEvent::ToggleWhatsAppAlerts => {
+                CliAgentMonitorModel::handle(ctx).update(ctx, |m, ctx| {
+                    let next = !m.alerts().whatsapp_enabled;
+                    m.set_whatsapp_alerts_enabled(next, ctx);
+                });
+                ctx.notify();
+            }
+            CliAgentMonitorPanelEvent::Dismissed => {
+                me.current_workspace_state.is_cli_agent_monitor_open = false;
+                ctx.notify();
+            }
+        });
+
+        let cli_agent_avatar_toast =
+            ctx.add_typed_action_view(|_ctx| CliAgentAvatarToastStack::new());
+        ctx.subscribe_to_view(&cli_agent_avatar_toast, |me, _, event, ctx| match event {
+            CliAgentAvatarToastEvent::Activate { session_id } => {
+                me.handle_action(
+                    &WorkspaceAction::ActivateCliAgentMonitorSession {
+                        session_id: session_id.clone(),
+                    },
+                    ctx,
+                );
+                me.current_workspace_state.is_cli_agent_monitor_open = true;
+                ctx.notify();
+            }
+            CliAgentAvatarToastEvent::ClosePet => {
+                me.handle_action(&WorkspaceAction::CloseCliAgentPet, ctx);
+            }
+        });
+        // Restore floating toast + desktop pet window from persisted pet mode.
+        let pet_floating = CliAgentMonitorModel::as_ref(ctx).may_show_floating_pet();
+        cli_agent_avatar_toast.update(ctx, |toast, ctx| {
+            toast.set_floating_enabled(pet_floating, ctx);
+        });
         let notification_toast_stack = if FeatureFlag::HOANotifications.is_enabled() {
             Some(ctx.add_typed_action_view(AgentNotificationToastStack::new))
         } else {
@@ -3147,6 +3234,93 @@ impl Workspace {
         );
         ctx.subscribe_to_model(&CLIAgentSessionsModel::handle(ctx), |me, _, event, ctx| {
             me.handle_cli_agent_sessions_event(event, ctx);
+        });
+
+        ctx.subscribe_to_model(&CliAgentMonitorModel::handle(ctx), |me, _, event, ctx| {
+            match event {
+                CliAgentMonitorEvent::Changed => {
+                    let count = CliAgentMonitorModel::as_ref(ctx).store().total_agents();
+                    me.cli_agent_monitor_panel.update(ctx, |panel, _| {
+                        panel.prepare_for_rows(count);
+                    });
+                    ctx.notify();
+                }
+                CliAgentMonitorEvent::PetModeChanged { mode } => {
+                    let show = mode.shows_floating_pet();
+                    me.cli_agent_avatar_toast.update(ctx, |toast, ctx| {
+                        toast.set_floating_enabled(show, ctx);
+                    });
+                    sync_desktop_pet_window_to_mode(ctx);
+                    ctx.notify();
+                }
+                CliAgentMonitorEvent::NotificationRequested {
+                    title,
+                    body,
+                    session_id,
+                    kind,
+                } => {
+                    use crate::terminal::cli_agent_monitor::NotificationKind;
+                    log::info!(
+                        "CLI agent monitor notification: title={title:?} session={session_id} kind={kind:?}"
+                    );
+                    let alerts = CliAgentMonitorModel::as_ref(ctx).alerts().clone();
+                    // Ensure floating pet is open so the speech bubble is visible.
+                    sync_desktop_pet_window_to_mode(ctx);
+                    // Session-quality sounds (Ping/Glass/Basso) — independent of
+                    // Notification Center mute; per-session cooldown avoids spam.
+                    let want_sound = alerts.desktop_sound
+                        && SessionSettings::as_ref(ctx)
+                            .notifications
+                            .play_notification_sound;
+                    if want_sound {
+                        let played = crate::terminal::cli_agent_monitor::play_for_notification(
+                            *kind,
+                            session_id,
+                        );
+                        if !played {
+                            // Cooldown suppressed afplay — still soft-beep once.
+                            let _ = crate::terminal::AudibleBell::as_ref(ctx).ring();
+                        }
+                    }
+                    // In-app toast (when floating UI enabled).
+                    me.cli_agent_avatar_toast.update(ctx, |toast, ctx| {
+                        toast.push_message(
+                            title.clone(),
+                            body.clone(),
+                            session_id.clone(),
+                            ctx,
+                        );
+                    });
+                    // macOS Notification Center / banner (bandeja).
+                    if alerts.desktop_enabled {
+                        me.send_cli_agent_monitor_desktop_notification(
+                            title.clone(),
+                            body.clone(),
+                            session_id.clone(),
+                            ctx,
+                        );
+                    }
+                    // WhatsApp only on completed (design non-goal: not every human-gate).
+                    if matches!(kind, NotificationKind::Completed) {
+                        if alerts.whatsapp_ready() {
+                            me.send_cli_agent_monitor_whatsapp_alert(
+                                title.clone(),
+                                body.clone(),
+                                session_id.clone(),
+                                alerts,
+                                ctx,
+                            );
+                        } else if alerts.whatsapp_enabled {
+                            log::warn!(
+                                "WhatsApp alerts enabled but phone/api_key missing \
+                                 (set ~/.warp-oss/cli_agent_monitor/alerts.json or \
+                                 WARP_WHATSAPP_PHONE + WARP_WHATSAPP_API_KEY)"
+                            );
+                        }
+                    }
+                    ctx.notify();
+                }
+            }
         });
 
         ctx.subscribe_to_model(
@@ -3493,6 +3667,8 @@ impl Workspace {
             enable_auto_reload_modal,
             agent_management_view,
             notification_mailbox_view,
+            cli_agent_monitor_panel,
+            cli_agent_avatar_toast,
             notification_toast_stack,
             codex_modal,
             cloud_agent_capacity_modal,
@@ -3533,6 +3709,11 @@ impl Workspace {
         WorkspaceRegistry::handle(ctx).update(ctx, |registry, _| {
             registry.register(window_id, weak_handle);
         });
+
+        // Desktop pet: separate always-on-top window when preference is VISIBLE.
+        if CliAgentMonitorModel::as_ref(ctx).may_show_floating_pet() {
+            let _ = ensure_desktop_pet_window(ctx);
+        }
 
         ws
     }
@@ -3709,6 +3890,15 @@ impl Workspace {
         event: &CLIAgentSessionsModelEvent,
         ctx: &mut ViewContext<Self>,
     ) {
+        // Ended often removes the live session first — still clean monitor zombies.
+        if matches!(event, CLIAgentSessionsModelEvent::Ended { .. }) {
+            let tid = event.terminal_view_id().to_string();
+            CliAgentMonitorModel::handle(ctx).update(ctx, |monitor, ctx| {
+                monitor.on_terminal_ended(&tid, ctx);
+            });
+            ctx.notify();
+        }
+
         if matches!(
             event,
             CLIAgentSessionsModelEvent::Started { .. }
@@ -3717,8 +3907,84 @@ impl Workspace {
                 | CLIAgentSessionsModelEvent::SessionUpdated { .. }
         ) && self.workspace_contains_terminal_view(event.terminal_view_id(), ctx)
         {
+            self.sync_cli_agent_monitor_from_sessions(event, ctx);
             ctx.notify();
         }
+    }
+
+    /// Push CLI agent session status into the ADHD review monitor.
+    fn sync_cli_agent_monitor_from_sessions(
+        &mut self,
+        event: &CLIAgentSessionsModelEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        use crate::terminal::cli_agent_monitor::{
+            CliAgentMonitorModel, live_signal_from_session_status, monitor_agent_from_cli,
+        };
+        use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let terminal_view_id = event.terminal_view_id();
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        // On Ended the live model may already have dropped the session — zombies
+        // were cleaned in handle_cli_agent_sessions_event; nothing left to track.
+        if matches!(event, CLIAgentSessionsModelEvent::Ended { .. }) {
+            return;
+        }
+
+        let Some((agent, status, project, cwd, plugin_session_id)) =
+            CLIAgentSessionsModel::handle(ctx).read(ctx, |model, _| {
+                model.session(terminal_view_id).map(|session| {
+                    (
+                        session.agent,
+                        session.status.clone(),
+                        session.session_context.project.clone(),
+                        session.session_context.cwd.clone(),
+                        session.session_context.session_id.clone(),
+                    )
+                })
+            })
+        else {
+            return;
+        };
+
+        let Some(monitor_agent) = monitor_agent_from_cli(agent) else {
+            return;
+        };
+
+        let session_id = plugin_session_id.unwrap_or_else(|| {
+            format!("{}:{}", monitor_agent.display_name(), terminal_view_id)
+        });
+        let signal = live_signal_from_session_status(&status);
+        // Ended without success → treat as unknown only if still running; leave review sticky.
+        let signal = if matches!(event, CLIAgentSessionsModelEvent::Ended { .. })
+            && matches!(
+                signal,
+                crate::terminal::cli_agent_monitor::LiveSessionSignal::InProgress
+            )
+        {
+            // Process died while running: keep last state; no force-complete.
+            signal
+        } else {
+            signal
+        };
+
+        CliAgentMonitorModel::handle(ctx).update(ctx, |monitor, ctx| {
+            monitor.track_cli_session(
+                session_id,
+                monitor_agent,
+                terminal_view_id.to_string(),
+                project,
+                cwd,
+                signal,
+                now_ms,
+                ctx,
+            );
+        });
     }
 
     /// Handle session settings changes.
@@ -5868,11 +6134,12 @@ impl Workspace {
 
     /// Searches other windows for the given terminal view and focuses it there.
     /// (Uses the same cross-window dispatch pattern as open_notebook/open_workflow.)
+    /// Returns true if a remote terminal was found and focus was requested.
     fn focus_terminal_view_in_other_window(
         &self,
         terminal_view_id: EntityId,
         ctx: &mut ViewContext<Self>,
-    ) {
+    ) -> bool {
         let current_window = ctx.window_id();
         let result = WorkspaceRegistry::as_ref(ctx)
             .all_workspaces(ctx)
@@ -5903,6 +6170,9 @@ impl Workspace {
                     &locator,
                 );
             }
+            true
+        } else {
+            false
         }
     }
 
@@ -20342,6 +20612,238 @@ impl Workspace {
         .finish()
     }
 
+    /// Compact CLI agent monitor chip: visible bar label `N agentes · M para revisar`.
+    /// Always shown even when the pet is CLOSED. Right-click: “Mostrar pet”.
+    fn render_cli_agent_monitor_button(
+        &self,
+        appearance: &Appearance,
+        ctx: &AppContext,
+    ) -> Box<dyn Element> {
+        use pathfinder_geometry::vector::vec2f;
+        use warpui::elements::{MainAxisAlignment, MainAxisSize};
+        use warpui::ui_components::button::{TextAndIcon, TextAndIconAlignment};
+
+        let monitor = CliAgentMonitorModel::as_ref(ctx);
+        let indicator = compact_indicator_from_store(monitor.store());
+        let pet_mode = monitor.pet_mode();
+        let is_active = self.current_workspace_state.is_cli_agent_monitor_open;
+        let theme = appearance.theme();
+        let icon_color = if is_active {
+            theme.main_text_color(theme.background())
+        } else {
+            theme.sub_text_color(theme.background())
+        };
+
+        let tooltip = match pet_mode {
+            PetMode::Closed | PetMode::Minimized => {
+                format!(
+                    "CLI agents — {indicator}\n\
+                     Click: panel de agentes\n\
+                     Click derecho: MOSTRAR pet Sumanos\n\
+                     O Command Palette → “Mostrar pet Sumanos”"
+                )
+            }
+            PetMode::Visible => {
+                format!(
+                    "CLI agents — {indicator}\n\
+                     Click: panel · Click derecho: re-mostrar pet"
+                )
+            }
+        };
+
+        // When pet is hidden, surface a short chip suffix so users know how to recover it.
+        let chip_label = match pet_mode {
+            PetMode::Visible => indicator,
+            PetMode::Closed | PetMode::Minimized => format!("{indicator} · pet off"),
+        };
+
+        // Must use ui_builder().button so font_family_id is set (with_text_label on
+        // icon_button_with_color panics — styles.font_family_id is None).
+        let mut button = appearance
+            .ui_builder()
+            .button(
+                warpui::ui_components::button::ButtonVariant::Text,
+                self.mouse_states.cli_agent_monitor_button.clone(),
+            )
+            .with_style(UiComponentStyles {
+                font_color: Some(icon_color.into()),
+                font_size: Some(11.),
+                padding: Some(warpui::ui_components::components::Coords {
+                    top: 2.,
+                    bottom: 2.,
+                    left: 4.,
+                    right: 6.,
+                }),
+                ..Default::default()
+            })
+            .with_text_and_icon_label(
+                TextAndIcon::new(
+                    TextAndIconAlignment::IconFirst,
+                    chip_label,
+                    icons::Icon::AgentMode.to_warpui_icon(icon_color.into()),
+                    MainAxisSize::Min,
+                    MainAxisAlignment::Start,
+                    vec2f(14., 14.),
+                )
+                .with_inner_padding(4.),
+            )
+            .with_tooltip(self.render_tab_bar_icon_button_tooltip(appearance, tooltip, None));
+
+        if is_active {
+            button = button.active().with_active_styles(UiComponentStyles {
+                background: Some(internal_colors::fg_overlay_3(theme).into()),
+                font_color: Some(icon_color.into()),
+                ..Default::default()
+            });
+        }
+
+        let button = button
+            .build()
+            .on_click(|ctx, _, _| {
+                ctx.dispatch_typed_action(WorkspaceAction::ToggleCliAgentMonitor);
+            })
+            .on_right_click(|ctx, _, _| {
+                ctx.dispatch_typed_action(WorkspaceAction::ShowCliAgentPet);
+            })
+            .finish();
+
+        SavePosition::new(button, CLI_AGENT_MONITOR_POSITION_ID).finish()
+    }
+
+    fn send_cli_agent_monitor_desktop_notification(
+        &mut self,
+        title: String,
+        body: String,
+        session_id: String,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let alerts = CliAgentMonitorModel::as_ref(ctx).alerts();
+        let play_sound = alerts.desktop_sound
+            && SessionSettings::as_ref(ctx)
+                .notifications
+                .play_notification_sound;
+        let data = NotificationContext::CliAgentMonitor { session_id };
+        let Ok(data_str) = serde_json::to_string(&data) else {
+            return;
+        };
+        ctx.send_desktop_notification(
+            UserNotification::new_with_sound(title, body, Some(data_str), play_sound),
+            move |_workspace, notification_error, ctx| {
+                send_telemetry_from_ctx!(
+                    TelemetryEvent::NotificationFailedToSend {
+                        error: notification_error.clone()
+                    },
+                    ctx
+                );
+            },
+        );
+    }
+
+    fn send_cli_agent_monitor_whatsapp_alert(
+        &mut self,
+        title: String,
+        body: String,
+        session_id: String,
+        alerts: crate::terminal::cli_agent_monitor::AlertPreferences,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        use crate::terminal::cli_agent_monitor::{
+            format_agent_alert_message, send_whatsapp_callmebot,
+        };
+        let text = format_agent_alert_message(&title, &body, &session_id);
+        let phone = alerts.whatsapp_phone.clone();
+        let api_key = alerts.whatsapp_api_key.clone();
+        // Background HTTP — never block the UI thread.
+        ctx.spawn(
+            async move { send_whatsapp_callmebot(phone, api_key, text).await },
+            |_me, result, _ctx| match result {
+                Ok(()) => log::info!("CLI agent WhatsApp alert delivered"),
+                Err(err) => log::warn!("CLI agent WhatsApp alert failed: {err}"),
+            },
+        );
+    }
+
+    /// Focus associated terminal and apply review product path.
+    /// Always brings Warp to the front; opens the monitor panel; clears the pet bubble.
+    fn activate_cli_agent_monitor_session(
+        &mut self,
+        session_id: &str,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        // Bring this workspace window (and the app) to the front first.
+        let this_window = ctx.window_id();
+        ctx.windows().show_window_and_focus_app(this_window);
+
+        let terminal_raw = CliAgentMonitorModel::as_ref(ctx)
+            .store()
+            .get(session_id)
+            .and_then(|s| s.terminal_view_id.clone());
+
+        let (exists, focused) = if let Some(raw) = terminal_raw.as_deref() {
+            if let Some(id_usize) = parse_terminal_view_id(raw) {
+                let entity_id = EntityId::from_usize(id_usize);
+                let exists_here = self.workspace_contains_terminal_view(entity_id, ctx);
+                if exists_here {
+                    let focused = self.focus_terminal_view_locally(entity_id, ctx);
+                    (true, focused)
+                } else {
+                    // Terminal may live in another Warp window.
+                    let found = self.focus_terminal_view_in_other_window(entity_id, ctx);
+                    (found, found)
+                }
+            } else {
+                (false, false)
+            }
+        } else {
+            (false, false)
+        };
+
+        // Surface the list so the user always has a path when focus fails.
+        self.current_workspace_state.is_cli_agent_monitor_open = true;
+        let count = CliAgentMonitorModel::as_ref(ctx).store().active_agent_count();
+        self.cli_agent_monitor_panel.update(ctx, |panel, _| {
+            panel.prepare_for_rows(count.max(8));
+        });
+
+        let was_pending_review = CliAgentMonitorModel::as_ref(ctx)
+            .store()
+            .get(session_id)
+            .is_some_and(|s| s.is_pending_review());
+
+        CliAgentMonitorModel::handle(ctx).update(ctx, |monitor, ctx| {
+            let _ = monitor.product_activate(session_id, exists, focused, now_ms, ctx);
+            // Click on a COMPLETED_UNSEEN alert = "I saw this". If focus could not
+            // transition to Reviewed (missing terminal / failed focus), force mark.
+            if was_pending_review {
+                let still_pending = monitor
+                    .store()
+                    .get(session_id)
+                    .is_some_and(|s| s.is_pending_review());
+                if still_pending {
+                    let _ = monitor.product_mark_reviewed(session_id, now_ms, ctx);
+                }
+            }
+            monitor.clear_active_alert(ctx);
+        });
+        ctx.notify();
+    }
+
+    fn mark_cli_agent_monitor_reviewed(&mut self, session_id: &str, ctx: &mut ViewContext<Self>) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        CliAgentMonitorModel::handle(ctx).update(ctx, |monitor, ctx| {
+            let _ = monitor.product_mark_reviewed(session_id, now_ms, ctx);
+        });
+        ctx.notify();
+    }
+
     fn render_left_toggle_button(
         &self,
         appearance: &Appearance,
@@ -21079,6 +21581,9 @@ impl Workspace {
                 self.render_agent_management_view_button(appearance, ctx)
             }
             HeaderToolbarItemKind::CodeReview => self.render_right_panel_button(appearance, ctx),
+            HeaderToolbarItemKind::CliAgentMonitor => {
+                self.render_cli_agent_monitor_button(appearance, ctx)
+            }
             HeaderToolbarItemKind::NotificationsMailbox => {
                 self.render_notifications_mailbox_button(appearance, ctx)
             }
@@ -22800,7 +23305,8 @@ impl Workspace {
                 Some(ChildView::new(&self.right_panel_view).finish())
             }
             HeaderToolbarItemKind::AgentManagement
-            | HeaderToolbarItemKind::NotificationsMailbox => None,
+            | HeaderToolbarItemKind::NotificationsMailbox
+            | HeaderToolbarItemKind::CliAgentMonitor => None, // Popover overlay, not a docked panel.
         }
     }
 
@@ -24796,6 +25302,71 @@ impl TypedActionView for Workspace {
                     ),
                     ctx
                 );
+                ctx.notify();
+            }
+            ToggleCliAgentMonitor => {
+                let opening = !self.current_workspace_state.is_cli_agent_monitor_open;
+                self.current_workspace_state.is_cli_agent_monitor_open = opening;
+                if opening {
+                    let count = CliAgentMonitorModel::as_ref(ctx).store().total_agents();
+                    self.cli_agent_monitor_panel.update(ctx, |panel, _| {
+                        panel.prepare_for_rows(count.max(8));
+                    });
+                    // Close mailbox so both popovers don't stack.
+                    self.current_workspace_state.is_notification_mailbox_open = false;
+                }
+                ctx.notify();
+            }
+            ActivateCliAgentMonitorSession { session_id } => {
+                self.activate_cli_agent_monitor_session(session_id, ctx);
+            }
+            MarkCliAgentMonitorReviewed { session_id } => {
+                self.mark_cli_agent_monitor_reviewed(session_id, ctx);
+            }
+            RemoveCliAgentMonitorSession { session_id } => {
+                CliAgentMonitorModel::handle(ctx).update(ctx, |m, ctx| {
+                    m.remove_session(session_id, ctx);
+                });
+                self.cli_agent_avatar_toast.update(ctx, |toast, ctx| {
+                    // Drop any toast tied to this session visually.
+                    toast.dismiss_all_visual_public(ctx);
+                });
+                ctx.notify();
+            }
+            ClearCliAgentMonitor => {
+                CliAgentMonitorModel::handle(ctx).update(ctx, |m, ctx| {
+                    m.clear_all_sessions(ctx);
+                });
+                self.cli_agent_avatar_toast.update(ctx, |toast, ctx| {
+                    toast.set_floating_enabled(false, ctx);
+                    toast.dismiss_all_visual_public(ctx);
+                });
+                close_desktop_pet_window(ctx);
+                ctx.notify();
+            }
+            CloseCliAgentPet => {
+                CliAgentMonitorModel::handle(ctx).update(ctx, |m, ctx| m.close_pet(ctx));
+                self.cli_agent_avatar_toast.update(ctx, |toast, ctx| {
+                    toast.set_floating_enabled(false, ctx);
+                    toast.dismiss_all_visual_public(ctx);
+                });
+                close_desktop_pet_window(ctx);
+                ctx.notify();
+            }
+            ShowCliAgentPet => {
+                CliAgentMonitorModel::handle(ctx).update(ctx, |m, ctx| m.show_pet(ctx));
+                self.cli_agent_avatar_toast.update(ctx, |toast, ctx| {
+                    toast.set_floating_enabled(true, ctx);
+                });
+                let _ = ensure_desktop_pet_window(ctx);
+                ctx.notify();
+            }
+            MinimizeCliAgentPet => {
+                CliAgentMonitorModel::handle(ctx).update(ctx, |m, ctx| m.minimize_pet(ctx));
+                self.cli_agent_avatar_toast.update(ctx, |toast, ctx| {
+                    toast.set_floating_enabled(false, ctx);
+                });
+                close_desktop_pet_window(ctx);
                 ctx.notify();
             }
             ToggleAgentManagementView => {
@@ -27464,6 +28035,25 @@ impl View for Workspace {
                 ),
             );
         }
+
+        if self.current_workspace_state.is_cli_agent_monitor_open {
+            stack.add_positioned_overlay_child(
+                ChildView::new(&self.cli_agent_monitor_panel).finish(),
+                OffsetPositioning::offset_from_save_position_element(
+                    CLI_AGENT_MONITOR_POSITION_ID,
+                    Vector2F::zero(),
+                    PositionedElementOffsetBounds::WindowByPosition,
+                    PositionedElementAnchor::BottomRight,
+                    ChildAnchor::TopRight,
+                ),
+            );
+        }
+
+        // Sumanos avatar message toasts under the tab bar (CLI agent finished).
+        stack.add_positioned_overlay_child(
+            ChildView::new(&self.cli_agent_avatar_toast).finish(),
+            avatar_toast_positioning(TAB_BAR_POSITION_ID),
+        );
 
         if !FeatureFlag::AgentMode.is_enabled()
             && AISettings::as_ref(app).is_any_ai_enabled(app)

@@ -260,6 +260,7 @@ pub fn initialize_app(app: &mut App) {
         )
     });
     app.add_singleton_model(|_| CLIAgentSessionsModel::new());
+    app.add_singleton_model(|_| crate::terminal::cli_agent_monitor::CliAgentMonitorModel::new());
     // The blocklist controller created during terminal bootstrap subscribes to
     // OrchestrationEventService and OrchestrationEventStreamer unconditionally,
     // so both singletons must be registered before bootstrap.

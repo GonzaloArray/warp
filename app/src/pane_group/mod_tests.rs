@@ -84,6 +84,7 @@ use crate::settings_view::keybindings::KeybindingChangedNotifier;
 use crate::suggestions::ignored_suggestions_model::IgnoredSuggestionsModel;
 use crate::system::SystemStats;
 use crate::terminal::alt_screen_reporting::AltScreenReporting;
+use crate::terminal::cli_agent_monitor::CliAgentMonitorModel;
 use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
 use crate::terminal::history::History;
 use crate::terminal::keys::TerminalKeybindings;
@@ -175,6 +176,7 @@ fn initialize_app(app: &mut App) {
         )
     });
     app.add_singleton_model(|_| CLIAgentSessionsModel::new());
+    app.add_singleton_model(|_| crate::terminal::cli_agent_monitor::CliAgentMonitorModel::new());
     app.add_singleton_model(OrchestrationEventService::new);
     app.add_singleton_model(LocalAgentTaskSyncModel::new);
     app.add_singleton_model(OrchestrationEventStreamer::new);

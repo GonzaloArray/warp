@@ -221,9 +221,18 @@ void warp_marked_text_cleared(WarpHostView *);
 - (void)mouseDown:(NSEvent *)event {
     if (self.readyForWarp) {
         BOOL eventHandled = warp_handle_view_event(self, event, NO);
-        if (self->titlebarDragEnabled && !eventHandled && [self mouseInTitleBar:event]) {
-            // If Warp doesn't do anything with the event, indicated by returning `false`, and
-            // if the drag starts in the titlebar, begin dragging the window
+        if (eventHandled) {
+            return;
+        }
+        // Standard windows: drag from the titlebar region when enabled.
+        if (self->titlebarDragEnabled && [self mouseInTitleBar:event]) {
+            [self.window performWindowDragWithEvent:event];
+            return;
+        }
+        // FloatingMovable companions (e.g. desktop pet): titlebar drag is off on
+        // NSPanel, but the window is explicitly movable by background — drag from
+        // any unhandled click so the user can place it anywhere on screen.
+        if (self.window.isMovable && self.window.isMovableByWindowBackground) {
             [self.window performWindowDragWithEvent:event];
         }
     }

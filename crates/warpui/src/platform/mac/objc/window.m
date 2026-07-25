@@ -750,6 +750,29 @@ void init_warp_nswindow(NSWindow<WarpWindowProtocol> *window, bool testMode, boo
     [self makeKeyAndOrderFront:nil];
 }
 
+// Desktop pet / companion: float above normal apps but stay freely draggable.
+// Looks like a bare image (no app chrome): tiny min size, no shadow, transparent.
+- (void)positionFloatingMovablePanel {
+    self.level = NSFloatingWindowLevel;
+    self.collectionBehavior =
+        (self.collectionBehavior | NSWindowCollectionBehaviorCanJoinAllSpaces |
+         NSWindowCollectionBehaviorFullScreenAuxiliary |
+         NSWindowCollectionBehaviorTransient |
+         NSWindowCollectionBehaviorIgnoresCycle);
+    [self setMovable:YES];
+    [self setMovableByWindowBackground:YES];
+    // Override Warp's global min (480×192) so the pet can be avatar-sized.
+    NSSize petMin = NSMakeSize(32.0, 32.0);
+    self.minSize = petMin;
+    self.contentMinSize = petMin;
+    // Rectangular shadow reads as an "app square"; pet should be just the PNG.
+    [self setHasShadow:NO];
+    [self setOpaque:NO];
+    self.backgroundColor = NSColor.clearColor;
+    // Do not steal focus from the main Warp window or other apps.
+    [self orderFront:nil];
+}
+
 // Note this returns a retained object ("create" rule).
 + (WarpPanel *)createWithContentRect:(NSRect)contentRect
                          metalDevice:(id)metalDevice
@@ -780,7 +803,10 @@ void set_window_background_blur_radius(id window, uint8 blurRadiusPixels) {
         CGSSetWindowBackgroundBlurRadiusFunction *function =
             GetCGSSetWindowBackgroundBlurRadiusFunction();
         if (function) {
-            function(con, windowNumber, (int)MAX(1, blurRadiusPixels));
+            // 0 = fully transparent companion windows (desktop pet); others keep
+            // a floor of 1 so normal Warp windows still get subtle blur.
+            int radius = blurRadiusPixels == 0 ? 0 : (int)MAX(1, blurRadiusPixels);
+            function(con, windowNumber, radius);
         }
     }
 }

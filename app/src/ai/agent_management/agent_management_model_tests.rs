@@ -13,6 +13,7 @@ use crate::ai::agent_management::notifications::{
 use crate::ai::artifacts::Artifact;
 use crate::ai::blocklist::BlocklistAIHistoryEvent;
 use crate::settings::AISettings;
+use crate::terminal::cli_agent_monitor::CliAgentMonitorModel;
 use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
 use crate::test_util::settings::initialize_settings_for_tests;
 
@@ -28,6 +29,7 @@ fn setup_app(
     // notifications model reads it to suppress completion notifications when a prompt is queued.
     app.add_singleton_model(crate::ai::blocklist::QueuedQueryModel::new);
     app.add_singleton_model(|_| CLIAgentSessionsModel::new());
+    app.add_singleton_model(|_| crate::terminal::cli_agent_monitor::CliAgentMonitorModel::new());
     app.add_singleton_model(|_| ActiveAgentViewsModel::new());
     let notifications = app.add_singleton_model(AgentNotificationsModel::new);
     (history, notifications)

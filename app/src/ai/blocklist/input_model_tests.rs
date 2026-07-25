@@ -30,6 +30,7 @@ use crate::ai::blocklist::conversation_selection::{
 };
 use crate::ai::blocklist::input_mode_policy::{InputModePolicy, PolicyConfigUpdate};
 use crate::settings::{AISettings, AISettingsChangedEvent};
+use crate::terminal::cli_agent_monitor::CliAgentMonitorModel;
 use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
 use crate::terminal::color::{self, Colors};
 use crate::terminal::event_listener::ChannelEventListener;
@@ -245,6 +246,7 @@ fn build_input_model(
 ) {
     initialize_history_persistence_for_tests(app);
     app.add_singleton_model(|_| CLIAgentSessionsModel::new());
+    app.add_singleton_model(|_| crate::terminal::cli_agent_monitor::CliAgentMonitorModel::new());
 
     let terminal_model = Arc::new(FairMutex::new(TerminalModel::new_for_test(
         block_size(),

@@ -25,11 +25,16 @@ impl SettingsPaneManager {
     }
 
     pub fn settings_view(&self, window_id: WindowId) -> ViewHandle<SettingsView> {
+        self.try_settings_view(window_id)
+            .expect("Window should have corresponding settings view")
+    }
+
+    /// Settings are registered only for workspace windows. Auxiliary windows
+    /// (e.g. the floating Sumanos desktop pet) intentionally have none.
+    pub fn try_settings_view(&self, window_id: WindowId) -> Option<ViewHandle<SettingsView>> {
         self.panes
             .get(&window_id)
-            .expect("Window should have corresponding settings view")
-            .settings_view
-            .clone()
+            .map(|data| data.settings_view.clone())
     }
 
     pub fn register_view(&mut self, window_id: WindowId, view: ViewHandle<SettingsView>) {

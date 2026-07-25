@@ -498,6 +498,7 @@ fn install_model_with_call_counter(
 /// that instantiate the model must register it first.
 fn register_cli_agent_sessions_model(app: &mut App) {
     app.add_singleton_model(|_| CLIAgentSessionsModel::new());
+    app.add_singleton_model(|_| crate::terminal::cli_agent_monitor::CliAgentMonitorModel::new());
 }
 
 /// A pane-scoped CLI session can end during setup without ending the driver run,
@@ -507,6 +508,7 @@ fn cli_task_mapping_survives_cli_session_end() {
     App::test((), |mut app| async move {
         app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
         let cli_sessions_model = app.add_singleton_model(|_| CLIAgentSessionsModel::new());
+    app.add_singleton_model(|_| crate::terminal::cli_agent_monitor::CliAgentMonitorModel::new());
         let succeeded_updates = Arc::new(AtomicUsize::new(0));
         let succeeded_updates_for_mock = succeeded_updates.clone();
         let mut mock = MockAIClient::new();

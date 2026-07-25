@@ -16,4 +16,8 @@ pub enum NotificationContext {
         pane_group_id: EntityId,
         pane_id: PaneId,
     },
+    /// CLI agent monitor: agent finished and needs review.
+    CliAgentMonitor {
+        session_id: String,
+    },
 }

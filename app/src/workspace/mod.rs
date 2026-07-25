@@ -1127,6 +1127,28 @@ pub fn init(app: &mut AppContext) {
         )
         .with_group(bindings::BindingGroup::Notifications.as_str())
         .with_context_predicate(id!("Workspace") & id!("Notifications_Enabled")),
+        // Sumanos desktop pet (CLI agent companion) — Command Palette discoverable.
+        EditableBinding::new(
+            "workspace:show_cli_agent_pet",
+            "Mostrar pet Sumanos (CLI agents)",
+            WorkspaceAction::ShowCliAgentPet,
+        )
+        .with_group(bindings::BindingGroup::Notifications.as_str())
+        .with_context_predicate(id!("Workspace")),
+        EditableBinding::new(
+            "workspace:close_cli_agent_pet",
+            "Ocultar pet Sumanos",
+            WorkspaceAction::CloseCliAgentPet,
+        )
+        .with_group(bindings::BindingGroup::Notifications.as_str())
+        .with_context_predicate(id!("Workspace")),
+        EditableBinding::new(
+            "workspace:toggle_cli_agent_monitor",
+            "Panel de agentes CLI (Claude / Codex / Grok)",
+            WorkspaceAction::ToggleCliAgentMonitor,
+        )
+        .with_group(bindings::BindingGroup::Notifications.as_str())
+        .with_context_predicate(id!("Workspace")),
         EditableBinding::new(
             "workspace:toggle_navigation_palette",
             BindingDescription::new("Toggle navigation palette")

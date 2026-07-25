@@ -657,7 +657,7 @@ impl platform::WindowManager for IntegrationTestWindowManager {
 fn window_level_for_style(style: WindowStyle) -> WindowLevel {
     match style {
         WindowStyle::NotStealFocus => WindowLevel::AlwaysOnBottom,
-        WindowStyle::Pin => WindowLevel::AlwaysOnTop,
+        WindowStyle::Pin | WindowStyle::FloatingMovable => WindowLevel::AlwaysOnTop,
         _ => WindowLevel::Normal,
     }
 }
